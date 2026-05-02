@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from 'next/server';
 import { randomBytes } from 'crypto';
 import { cookies } from 'next/headers';
 import { getAuthCodeUrl } from '../../../lib/microsoft/client';
-import { createClient } from '@supabase/supabase-js';
 
 /**
  * GET /api/auth/microsoft
@@ -11,29 +10,20 @@ import { createClient } from '@supabase/supabase-js';
  * httpOnly cookie and redirects to login.microsoftonline.com.
  */
 export async function GET(req: NextRequest) {
-  // Verify the user is authenticated to Humble Hello first.
-  // Adjust the auth check to match your Supabase SSR helper.
-  const supabase = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_ANON_KEY!,
-    {
-      global: { headers: { Cookie: req.headers.get('cookie') ?? '' } },
-    }
-  );
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) {
-    return NextResponse.redirect(new URL('/login', req.url));
+  const cookieStore = await cookies();
+  const userId = cookieStore.get('tom_session')?.value;
+
+  if (!userId) {
+    return NextResponse.redirect(new URL('/', req.url));
   }
 
-  // Generate state and store with userId so we can recover identity in callback
   const state = randomBytes(24).toString('hex');
-  const cookieStore = await cookies();
-  cookieStore.set('ms_oauth_state', `${state}:${user.id}`, {
+  cookieStore.set('ms_oauth_state', `${state}:${userId}`, {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
     sameSite: 'lax',
     path: '/',
-    maxAge: 60 * 10, // 10 minutes
+    maxAge: 60 * 10,
   });
 
   const authUrl = await getAuthCodeUrl(state);

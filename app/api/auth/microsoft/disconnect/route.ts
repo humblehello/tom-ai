@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { cookies } from 'next/headers';
 import { createClient } from '@supabase/supabase-js';
 import { disconnectMicrosoft } from '../../../../lib/microsoft/client';
 
@@ -9,13 +10,12 @@ import { disconnectMicrosoft } from '../../../../lib/microsoft/client';
  * primary provider and Google is connected, falls back to Google.
  */
 export async function POST(req: NextRequest) {
-  const supabase = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_ANON_KEY!,
-    { global: { headers: { Cookie: req.headers.get('cookie') ?? '' } } }
-  );
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
+  const cookieStore = await cookies();
+  const userId = cookieStore.get('tom_session')?.value;
+
+  if (!userId) {
+    return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
+  }
 
   const admin = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -23,21 +23,20 @@ export async function POST(req: NextRequest) {
     { auth: { persistSession: false } }
   );
 
-  // If MS was primary and Google is still connected, switch primary to Google
   const { data: row } = await admin
     .from('tom_users')
     .select('primary_email_provider, google_refresh_token')
-    .eq('id', user.id)
+    .eq('id', userId)
     .single();
 
   if (row?.primary_email_provider === 'microsoft' && row.google_refresh_token) {
     await admin
       .from('tom_users')
       .update({ primary_email_provider: 'google' })
-      .eq('id', user.id);
+      .eq('id', userId);
   }
 
-  await disconnectMicrosoft(user.id);
+  await disconnectMicrosoft(userId);
 
   return NextResponse.json({ ok: true });
 }
