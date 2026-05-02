@@ -691,35 +691,31 @@ export const scheduledEmailSend = inngest.createFunction(
 
     for (const email of scheduled) {
       await step.run(`send-${email.id}`, async () => {
-        const accessToken = await getValidAccessToken(userId);
-        const { data: u } = await supabase
-          .from("tom_users")
-          .select("name, email")
-          .eq("id", userId)
-          .single();
+        const { sendUserEmail } = await import("./email-provider");
 
-        const raw = [
-          `To: ${email.contact_name ? `${email.contact_name} <${email.contact_email}>` : email.contact_email}`,
-          `From: ${u?.name} <${u?.email}>`,
-          `Subject: ${email.subject}`,
-          `Content-Type: text/plain; charset=utf-8`,
-          ``,
-          email.body,
-        ].join("\r\n");
+        let status: "sent" | "failed" = "failed";
+        try {
+          const recipient = email.contact_name
+            ? `${email.contact_name} <${email.contact_email}>`
+            : email.contact_email;
 
-        const res = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {
-          method: "POST",
-          headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
-          body: JSON.stringify({ raw: Buffer.from(raw).toString("base64url") }),
-        });
+          await sendUserEmail({
+            userId,
+            to: recipient,
+            subject: email.subject,
+            text: email.body,
+          });
+          status = "sent";
+        } catch (e) {
+          console.error(`Scheduled email send failed for ${email.id}:`, e);
+        }
 
-        const status = res.ok ? "sent" : "failed";
         await supabase
           .from("tom_scheduled_emails")
-          .update({ status, sent_at: res.ok ? new Date().toISOString() : null })
+          .update({ status, sent_at: status === "sent" ? new Date().toISOString() : null })
           .eq("id", email.id);
 
-        if (res.ok && email.contact_id) {
+        if (status === "sent" && email.contact_id) {
           await supabase
             .from("tom_contacts")
             .update({ last_emailed_at: new Date().toISOString() })
@@ -1624,13 +1620,12 @@ export const campaignSender = inngest.createFunction(
 
         const steps = allSteps || [];
 
-        // Get user's Gmail access token + signature once
-        const accessToken = await getValidAccessToken(user.id);
-        const { data: userRecord } = await supabase
-          .from("tom_users")
-          .select("name, email, gmail_signature")
-          .eq("id", user.id)
-          .single();
+        // Load user record for signature (sendUserEmail handles auth internally)
+const { data: userRecord } = await supabase
+  .from("tom_users")
+  .select("name, email, gmail_signature")
+  .eq("id", user.id)
+  .single();
 
         let sent = 0;
         let skipped = 0;
@@ -1654,130 +1649,116 @@ export const campaignSender = inngest.createFunction(
           switch (currentStep.step_type) {
 
             case "send_email": {
-              const firstName = contact.full_name?.split(" ")[0] || "there";
+  const firstName = contact.full_name?.split(" ")[0] || "there";
 
-              // Personalize subject + body
-              const subject = (currentStep.subject || "")
-                .replace(/\{\{first_name\}\}/g, firstName)
-                .replace(/\{\{full_name\}\}/g, contact.full_name || "");
+  // Personalize subject + body
+  const subject = (currentStep.subject || "")
+    .replace(/\{\{first_name\}\}/g, firstName)
+    .replace(/\{\{full_name\}\}/g, contact.full_name || "");
 
-              const bodyText = (currentStep.body || "")
-                .replace(/\{\{first_name\}\}/g, firstName)
-                .replace(/\{\{full_name\}\}/g, contact.full_name || "");
+  const bodyText = (currentStep.body || "")
+    .replace(/\{\{first_name\}\}/g, firstName)
+    .replace(/\{\{full_name\}\}/g, contact.full_name || "");
 
-              // Convert plain text to minimal HTML paragraphs
-              const bodyHtml = bodyText
-                .split(/\n\n+/)
-                .map((p: string) => `<p style="margin:0 0 16px 0;line-height:1.6;">${p.replace(/\n/g, "<br>")}</p>`)
-                .join("");
+  // Convert plain text to minimal HTML paragraphs
+  const bodyHtml = bodyText
+    .split(/\n\n+/)
+    .map((p: string) => `<p style="margin:0 0 16px 0;line-height:1.6;">${p.replace(/\n/g, "<br>")}</p>`)
+    .join("");
 
-              // Signature
-              const signature = userRecord?.gmail_signature || "";
-              const signatureHtml = signature
-                ? `<div style="margin-top:24px;padding-top:16px;border-top:1px solid #e5e5e5;font-size:13px;color:#666;">${signature.replace(/\n/g, "<br>")}</div>`
-                : "";
+  // Signature
+  const signature = userRecord?.gmail_signature || "";
+  const signatureHtml = signature
+    ? `<div style="margin-top:24px;padding-top:16px;border-top:1px solid #e5e5e5;font-size:13px;color:#666;">${signature.replace(/\n/g, "<br>")}</div>`
+    : "";
 
-              // Tracking
-              const { createOpenTrackingUrl: openUrl, createClickTrackingUrl: clickUrl } = await import("./campaign-tracking");
-              const pixelUrl = await openUrl(enrollment.id);
-              const optOutUrl = `${APP_URL}/optout/${enrollment.id}`;
+  // Tracking
+  const { createOpenTrackingUrl: openUrl, createClickTrackingUrl: clickUrl } = await import("./campaign-tracking");
+  const pixelUrl = await openUrl(enrollment.id);
+  const optOutUrl = `${APP_URL}/optout/${enrollment.id}`;
 
-              // Wrap links with click tracking
-              let trackedBodyHtml = bodyHtml;
-              for (const match of [...bodyHtml.matchAll(/href="(https?:\/\/[^"]+)"/g)]) {
-                const original = match[1];
-                if (!original.includes('/t/') && !original.includes('/o/') && !original.includes('optout')) {
-                  try {
-                    const tracked = await clickUrl(enrollment.id, original);
-                    trackedBodyHtml = trackedBodyHtml.replace(`href="${original}"`, `href="${tracked}"`);
-                  } catch {}
-                }
-              }
+  // Wrap links with click tracking
+  let trackedBodyHtml = bodyHtml;
+  for (const match of [...bodyHtml.matchAll(/href="(https?:\/\/[^"]+)"/g)]) {
+    const original = match[1];
+    if (!original.includes('/t/') && !original.includes('/o/') && !original.includes('optout')) {
+      try {
+        const tracked = await clickUrl(enrollment.id, original);
+        trackedBodyHtml = trackedBodyHtml.replace(`href="${original}"`, `href="${tracked}"`);
+      } catch {}
+    }
+  }
 
-              // Footer
-              const footerHtml = `<div style="margin-top:32px;padding-top:16px;border-top:1px solid #e5e5e5;font-size:11px;color:#999;line-height:1.6;">Sent via <a href="https://humblehello.com" style="color:#999;">Humble Hello</a> &nbsp;&middot;&nbsp; <a href="${optOutUrl}" style="color:#999;">Opt out of this campaign</a></div><img src="${pixelUrl}" width="1" height="1" style="display:none;" alt="" />`;
+  // Footer
+  const footerHtml = `<div style="margin-top:32px;padding-top:16px;border-top:1px solid #e5e5e5;font-size:11px;color:#999;line-height:1.6;">Sent via <a href="https://humblehello.com" style="color:#999;">Humble Hello</a> &nbsp;&middot;&nbsp; <a href="${optOutUrl}" style="color:#999;">Opt out of this campaign</a></div><img src="${pixelUrl}" width="1" height="1" style="display:none;" alt="" />`;
 
-              // Full HTML email
-              const htmlEmail = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="margin:0;padding:0;background:#ffffff;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;"><div style="max-width:600px;margin:0 auto;padding:32px 24px;font-size:15px;color:#1a1a1a;line-height:1.6;">${trackedBodyHtml}${signatureHtml}${footerHtml}</div></body></html>`;
+  // Full HTML email
+  const htmlEmail = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body style="margin:0;padding:0;background:#ffffff;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Arial,sans-serif;"><div style="max-width:600px;margin:0 auto;padding:32px 24px;font-size:15px;color:#1a1a1a;line-height:1.6;">${trackedBodyHtml}${signatureHtml}${footerHtml}</div></body></html>`;
 
-              // Multipart MIME
-              const boundary = `boundary_${Date.now()}`;
-              const raw = [
-                `To: ${contact.full_name} <${contactEmail}>`,
-                `From: ${userRecord?.name} <${userRecord?.email}>`,
-                `Subject: ${subject}`,
-                `MIME-Version: 1.0`,
-                `Content-Type: multipart/alternative; boundary="${boundary}"`,
-                ``,
-                `--${boundary}`,
-                `Content-Type: text/plain; charset=utf-8`,
-                ``,
-                bodyText,
-                ``,
-                `--${boundary}`,
-                `Content-Type: text/html; charset=utf-8`,
-                ``,
-                htmlEmail,
-                ``,
-                `--${boundary}--`,
-              ].join("\r\n");
+  // Respect stagger time
+  const msUntilSend = scheduledAt.getTime() - Date.now();
+  if (msUntilSend > 0) {
+    await new Promise(r => setTimeout(r, Math.min(msUntilSend, 60_000)));
+  }
 
-              // Send via Gmail — respect stagger time
-              const msUntilSend = scheduledAt.getTime() - Date.now();
-              if (msUntilSend > 0) {
-                await new Promise(r => setTimeout(r, Math.min(msUntilSend, 60_000)));
-              }
+  // Send via the user's primary email provider (Google or Microsoft)
+  const { sendUserEmail } = await import("./email-provider");
+  const recipient = `${contact.full_name} <${contactEmail}>`;
 
-              const res = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {
-                method: "POST",
-                headers: {
-                  Authorization: `Bearer ${accessToken}`,
-                  "Content-Type": "application/json",
-                },
-                body: JSON.stringify({ raw: Buffer.from(raw).toString("base64url") }),
-              });
+  let sendOk = false;
+  let sendError = "";
+  try {
+    await sendUserEmail({
+      userId: user.id,
+      to: recipient,
+      subject,
+      text: bodyText,
+      html: htmlEmail,
+    });
+    sendOk = true;
+  } catch (e: any) {
+    sendError = e?.message || String(e);
+    console.error(`[campaign-sender] send failed for enrollment ${enrollment.id}:`, sendError);
+  }
 
-              if (res.ok) {
-                // Log send event
-                await supabase.from("campaign_events").insert({
-                  campaign_id: campaign.id,
-                  enrollment_id: enrollment.id,
-                  contact_id: contact.id,
-                  step_id: currentStep.id,
-                  event_type: "email_sent",
-                  metadata: { subject, scheduled_at: scheduledAt.toISOString() },
-                });
+  if (sendOk) {
+    // Log send event
+    await supabase.from("campaign_events").insert({
+      campaign_id: campaign.id,
+      enrollment_id: enrollment.id,
+      contact_id: contact.id,
+      step_id: currentStep.id,
+      event_type: "email_sent",
+      metadata: { subject, scheduled_at: scheduledAt.toISOString() },
+    });
 
-                // Advance to next step — use step_order (actual column name)
-                const nextStep = steps.find((s: any) => s.step_order === currentStep.step_order + 1);
-                await supabase
-                  .from("campaign_enrollments")
-                  .update({
-                    current_step_id: nextStep?.id || null,
-                    next_send_at: nextStep ? new Date().toISOString() : null,
-                    status: nextStep ? "active" : "completed",
-                    completed_at: nextStep ? null : new Date().toISOString(),
-                  })
-                  .eq("id", enrollment.id);
+    // Advance to next step
+    const nextStep = steps.find((s: any) => s.step_order === currentStep.step_order + 1);
+    await supabase
+      .from("campaign_enrollments")
+      .update({
+        current_step_id: nextStep?.id || null,
+        next_send_at: nextStep ? new Date().toISOString() : null,
+        status: nextStep ? "active" : "completed",
+        completed_at: nextStep ? null : new Date().toISOString(),
+      })
+      .eq("id", enrollment.id);
 
-                sent++;
-              } else {
-                const err = await res.text();
-                console.error(`[campaign-sender] Gmail send failed for enrollment ${enrollment.id}:`, err);
+    sent++;
+  } else {
+    await supabase.from("campaign_events").insert({
+      campaign_id: campaign.id,
+      enrollment_id: enrollment.id,
+      contact_id: contact.id,
+      step_id: currentStep.id,
+      event_type: "email_failed",
+      metadata: { error: sendError },
+    });
 
-                await supabase.from("campaign_events").insert({
-                  campaign_id: campaign.id,
-                  enrollment_id: enrollment.id,
-                  contact_id: contact.id,
-                  step_id: currentStep.id,
-                  event_type: "email_failed",
-                  metadata: { error: err },
-                });
-
-                skipped++;
-              }
-              break;
-            }
+    skipped++;
+  }
+  break;
+}
 
             case "wait": {
               const days = currentStep.wait_days || 1;
