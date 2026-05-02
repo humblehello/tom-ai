@@ -2,25 +2,28 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createClient } from "@supabase/supabase-js";
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
+function getSupabase() {
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!
+  );
+}
 
 export async function GET() {
   const cookieStore = await cookies();
   const userId = cookieStore.get("tom_session")?.value;
   if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
+  const supabase = getSupabase();
+
   const { data } = await supabase
     .from("tom_users")
-    .select("id, name, email, timezone, home_city, card_profile, plan, trial_ends_at, stripe_subscription_id")
+    .select("id, name, email, timezone, home_city, card_profile, plan, trial_ends_at, stripe_subscription_id, refresh_token, google_account_email, microsoft_refresh_token, microsoft_account_email, primary_email_provider")
     .eq("id", userId)
     .single();
 
   if (!data) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-  // Compute effective plan
   const now = new Date();
   const trialEndsAt = data.trial_ends_at ? new Date(data.trial_ends_at) : null;
   const trialExpired = trialEndsAt ? now > trialEndsAt : false;
@@ -29,7 +32,6 @@ export async function GET() {
   let effectivePlan = data.plan || "free";
   if (effectivePlan === "trial" && trialExpired && !hasSubscription) {
     effectivePlan = "free";
-    // Downgrade in DB
     await supabase.from("tom_users").update({ plan: "free" }).eq("id", userId);
   }
 

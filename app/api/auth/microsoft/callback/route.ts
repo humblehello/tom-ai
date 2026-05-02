@@ -14,7 +14,7 @@ import { inngest } from '../../../../lib/inngest';
  * fetches the user's profile, and stores everything on tom_users.
  *
  * After success: kicks off the initial Inngest sync events and redirects
- * back to /settings/integrations with a success flag.
+ * back to /settings with a success flag.
  */
 export async function GET(req: NextRequest) {
   const url = new URL(req.url);
@@ -26,16 +26,16 @@ export async function GET(req: NextRequest) {
   // Handle user cancellation / consent denial
   if (error) {
     return NextResponse.redirect(
-      new URL(
-        `/settings/integrations?ms_error=${encodeURIComponent(errorDesc || error)}`,
-        req.url
-      )
+    new URL(
+  `/settings?ms_error=${encodeURIComponent(errorDesc || error)}`,
+  req.url
+)
     );
   }
 
   if (!code || !state) {
     return NextResponse.redirect(
-      new URL('/settings/integrations?ms_error=missing_code', req.url)
+      new URL('/settings?ms_error=missing_code', req.url)
     );
   }
 
@@ -46,14 +46,14 @@ export async function GET(req: NextRequest) {
 
   if (!stored) {
     return NextResponse.redirect(
-      new URL('/settings/integrations?ms_error=state_expired', req.url)
+      new URL('/settings?ms_error=state_expired', req.url)
     );
   }
 
   const [storedState, userId] = stored.split(':');
   if (storedState !== state || !userId) {
     return NextResponse.redirect(
-      new URL('/settings/integrations?ms_error=state_mismatch', req.url)
+      new URL('/settings?ms_error=state_mismatch', req.url)
     );
   }
 
@@ -64,13 +64,13 @@ export async function GET(req: NextRequest) {
   } catch (e) {
     console.error('[microsoft callback] token exchange failed', e);
     return NextResponse.redirect(
-      new URL('/settings/integrations?ms_error=token_exchange_failed', req.url)
+      new URL('/settings?ms_error=token_exchange_failed', req.url)
     );
   }
 
   if (!tokens.accessToken) {
     return NextResponse.redirect(
-      new URL('/settings/integrations?ms_error=no_access_token', req.url)
+      new URL('/settings?ms_error=no_access_token', req.url)
     );
   }
 
@@ -99,7 +99,7 @@ export async function GET(req: NextRequest) {
     // Fallback: if we didn't get a refresh token, the user probably didn't
     // grant offline_access. Redirect them with an actionable error.
     return NextResponse.redirect(
-      new URL('/settings/integrations?ms_error=no_refresh_token', req.url)
+      new URL('/settings?ms_error=no_refresh_token', req.url)
     );
   }
 
@@ -141,7 +141,7 @@ export async function GET(req: NextRequest) {
   }
 
   return NextResponse.redirect(
-    new URL('/settings/integrations?ms_connected=1', req.url)
+    new URL('/settings?ms_connected=1', req.url)
   );
 }
 

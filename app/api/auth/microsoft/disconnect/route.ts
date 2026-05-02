@@ -25,11 +25,11 @@ export async function POST(req: NextRequest) {
 
   const { data: row } = await admin
     .from('tom_users')
-    .select('primary_email_provider, google_refresh_token')
+    .select('primary_email_provider, refresh_token')
     .eq('id', userId)
     .single();
 
-  if (row?.primary_email_provider === 'microsoft' && row.google_refresh_token) {
+  if (row?.primary_email_provider === 'microsoft' && row.refresh_token) {
     await admin
       .from('tom_users')
       .update({ primary_email_provider: 'google' })

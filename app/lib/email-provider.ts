@@ -1,20 +1,10 @@
 import { createClient } from '@supabase/supabase-js';
 import { sendMicrosoftMail } from './microsoft/mail';
-// Adjust this import to match your existing Gmail helper:
-// import { sendGmail } from './google/gmail';
+import { getValidAccessToken } from './google';
 
 /**
  * Provider-agnostic email send. Routes to whichever provider the user has
  * marked as primary in tom_users.primary_email_provider.
- *
- * Use this everywhere the app sends mail on behalf of a user:
- *   - welcome email on onboarding_complete
- *   - card draft notifications
- *   - campaign step sends
- *   - verification emails
- *   - life-event triggered messages
- *
- * Keeps the call sites clean — they don't need to know which provider sent.
  */
 
 export interface SendEmailParams {
@@ -23,8 +13,13 @@ export interface SendEmailParams {
   cc?: string | string[];
   bcc?: string | string[];
   subject: string;
-  html: string;
+  /** Plain text body. Will be converted to HTML for the html branch. */
   text?: string;
+  /** HTML body. Takes precedence if both text and html are supplied. */
+  html?: string;
+  /** Display name to use in the From field. Defaults to user's name from DB. */
+  fromName?: string;
+  /** Reply-to address. Defaults to user's mailbox. */
   replyTo?: string;
 }
 
@@ -36,20 +31,27 @@ interface UserEmailConfig {
   hasMicrosoft: boolean;
   microsoftEmail: string | null;
   googleEmail: string | null;
+  userName: string | null;
 }
 
-export async function getUserEmailConfig(userId: string): Promise<UserEmailConfig> {
-  const supabase = createClient(
+function getSupabaseAdmin() {
+  return createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.SUPABASE_SERVICE_ROLE_KEY!,
     { auth: { persistSession: false } }
   );
+}
+
+export async function getUserEmailConfig(userId: string): Promise<UserEmailConfig> {
+  const supabase = getSupabaseAdmin();
 
   const { data, error } = await supabase
     .from('tom_users')
     .select(`
+      name,
+      email,
       primary_email_provider,
-      google_refresh_token,
+      refresh_token,
       google_account_email,
       microsoft_refresh_token,
       microsoft_account_email
@@ -59,11 +61,9 @@ export async function getUserEmailConfig(userId: string): Promise<UserEmailConfi
 
   if (error || !data) throw new Error(`User ${userId} not found`);
 
-  const hasGoogle = !!data.google_refresh_token;
+  const hasGoogle = !!data.refresh_token;
   const hasMicrosoft = !!data.microsoft_refresh_token;
 
-  // Determine effective provider — fall back to whichever is connected
-  // if their stated preference points at one they no longer have.
   let provider: EmailProvider = (data.primary_email_provider as EmailProvider) ?? 'google';
   if (provider === 'google' && !hasGoogle && hasMicrosoft) provider = 'microsoft';
   if (provider === 'microsoft' && !hasMicrosoft && hasGoogle) provider = 'google';
@@ -73,7 +73,8 @@ export async function getUserEmailConfig(userId: string): Promise<UserEmailConfi
     hasGoogle,
     hasMicrosoft,
     microsoftEmail: data.microsoft_account_email,
-    googleEmail: data.google_account_email,
+    googleEmail: data.google_account_email ?? data.email ?? null,
+    userName: data.name,
   };
 }
 
@@ -86,41 +87,144 @@ export async function sendUserEmail(params: SendEmailParams): Promise<void> {
     );
   }
 
+  // Build HTML if we only got text
+  const htmlBody = params.html ?? plainTextToHtml(params.text ?? '');
+  const textBody = params.text ?? stripHtml(params.html ?? '');
+
   if (config.provider === 'microsoft') {
     await sendMicrosoftMail(params.userId, {
       to: params.to,
       cc: params.cc,
       bcc: params.bcc,
       subject: params.subject,
-      html: params.html,
-      text: params.text,
+      html: htmlBody,
+      text: textBody,
       replyTo: params.replyTo,
     });
     return;
   }
 
-  // Google path — wire to your existing Gmail send helper.
-  // Throwing rather than silently swallowing keeps drift visible during refactor.
-  throw new Error(
-    'TODO: wire sendUserEmail Google path to existing sendGmail() helper'
-  );
-  // Example once wired:
-  // await sendGmail({
-  //   userId: params.userId,
-  //   to: params.to,
-  //   cc: params.cc,
-  //   bcc: params.bcc,
-  //   subject: params.subject,
-  //   html: params.html,
-  //   text: params.text,
-  //   replyTo: params.replyTo,
-  // });
+  // Google branch — send via Gmail API
+  await sendGmail({
+    userId: params.userId,
+    to: params.to,
+    cc: params.cc,
+    bcc: params.bcc,
+    subject: params.subject,
+    htmlBody,
+    textBody,
+    fromName: params.fromName ?? config.userName ?? '',
+    fromEmail: config.googleEmail ?? '',
+    replyTo: params.replyTo,
+  });
 }
 
-/**
- * Switch a user's primary provider. Only allowed if the target provider is
- * actually connected. Returns the new effective provider.
- */
+// ---------------------------------------------------------------------------
+// Gmail send (extracted from app/api/email/send/route.ts pattern)
+// ---------------------------------------------------------------------------
+
+interface GmailSendParams {
+  userId: string;
+  to: string | string[];
+  cc?: string | string[];
+  bcc?: string | string[];
+  subject: string;
+  htmlBody: string;
+  textBody: string;
+  fromName: string;
+  fromEmail: string;
+  replyTo?: string;
+}
+
+async function sendGmail(params: GmailSendParams): Promise<void> {
+  const accessToken = await getValidAccessToken(params.userId);
+
+  const toList = Array.isArray(params.to) ? params.to.join(', ') : params.to;
+  const ccList = params.cc
+    ? (Array.isArray(params.cc) ? params.cc.join(', ') : params.cc)
+    : null;
+  const bccList = params.bcc
+    ? (Array.isArray(params.bcc) ? params.bcc.join(', ') : params.bcc)
+    : null;
+
+  const fromHeader = params.fromName
+    ? `${params.fromName} <${params.fromEmail}>`
+    : params.fromEmail;
+
+  const boundary = 'boundary_' + Date.now();
+  const headers: string[] = [
+    `To: ${toList}`,
+    `From: ${fromHeader}`,
+    `Subject: ${params.subject}`,
+    'MIME-Version: 1.0',
+    `Content-Type: multipart/alternative; boundary="${boundary}"`,
+  ];
+  if (ccList) headers.push(`Cc: ${ccList}`);
+  if (bccList) headers.push(`Bcc: ${bccList}`);
+  if (params.replyTo) headers.push(`Reply-To: ${params.replyTo}`);
+
+  const emailLines = [
+    ...headers,
+    '',
+    `--${boundary}`,
+    'Content-Type: text/plain; charset=utf-8',
+    '',
+    params.textBody,
+    '',
+    `--${boundary}`,
+    'Content-Type: text/html; charset=utf-8',
+    '',
+    `<!DOCTYPE html><html><body style="font-family: sans-serif; font-size: 14px; color: #333;">${params.htmlBody}</body></html>`,
+    '',
+    `--${boundary}--`,
+  ].join('\r\n');
+
+  const encoded = Buffer.from(emailLines).toString('base64url');
+
+  const res = await fetch(
+    'https://gmail.googleapis.com/gmail/v1/users/me/messages/send',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ raw: encoded }),
+    }
+  );
+
+  if (!res.ok) {
+    const errBody = await res.text();
+    throw new Error(`Gmail send failed (${res.status}): ${errBody}`);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function plainTextToHtml(text: string): string {
+  return text
+    .split('\n')
+    .map((line) =>
+      line.trim() ? `<p style="margin:0 0 8px 0;">${escapeHtml(line)}</p>` : '<br>'
+    )
+    .join('\n');
+}
+
+function stripHtml(html: string): string {
+  return html.replace(/<[^>]+>/g, '').replace(/&nbsp;/g, ' ').trim();
+}
+
+function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 export async function setPrimaryEmailProvider(
   userId: string,
   provider: EmailProvider
@@ -134,11 +238,7 @@ export async function setPrimaryEmailProvider(
     throw new Error('Cannot set Microsoft as primary — Microsoft is not connected');
   }
 
-  const supabase = createClient(
-    process.env.NEXT_PUBLIC_SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_ROLE_KEY!,
-    { auth: { persistSession: false } }
-  );
+  const supabase = getSupabaseAdmin();
 
   await supabase
     .from('tom_users')

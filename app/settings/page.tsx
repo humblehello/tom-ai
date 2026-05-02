@@ -35,8 +35,16 @@ function Toggle({ value, onChange, label, desc }: { value: boolean; onChange: (v
   );
 }
 
-function ConnectionRow({ icon, name, desc, connected, comingSoon, planRequired, onConnect }: {
-  icon: string; name: string; desc: string; connected?: boolean; comingSoon?: boolean; planRequired?: string; onConnect?: () => void;
+function ConnectionRow({ icon, name, desc, connected, accountEmail, comingSoon, planRequired, onConnect, onDisconnect }: {
+  icon: string;
+  name: string;
+  desc: string;
+  connected?: boolean;
+  accountEmail?: string | null;
+  comingSoon?: boolean;
+  planRequired?: string;
+  onConnect?: () => void;
+  onDisconnect?: () => void;
 }) {
   return (
     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "14px 0", borderBottom: `1px solid ${C.border}` }}>
@@ -44,15 +52,22 @@ function ConnectionRow({ icon, name, desc, connected, comingSoon, planRequired, 
         <div style={{ width: 40, height: 40, borderRadius: 10, background: C.bg3, border: `1px solid ${C.border2}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 18, flexShrink: 0 }}>{icon}</div>
         <div>
           <div style={{ fontSize: 13, fontWeight: 600, color: C.text }}>{name}</div>
-          <div style={{ fontSize: 11, color: C.text3 }}>{desc}</div>
+          <div style={{ fontSize: 11, color: C.text3 }}>{accountEmail ? accountEmail : desc}</div>
         </div>
       </div>
-      <div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         {connected ? (
-          <div style={{ display: "flex", alignItems: "center", gap: 5, background: C.greenLight, border: `1px solid ${C.green}44`, borderRadius: 20, padding: "4px 12px" }}>
-            <div style={{ width: 6, height: 6, borderRadius: "50%", background: C.green }} />
-            <span style={{ fontSize: 11, fontWeight: 600, color: C.green }}>Connected</span>
-          </div>
+          <>
+            <div style={{ display: "flex", alignItems: "center", gap: 5, background: C.greenLight, border: `1px solid ${C.green}44`, borderRadius: 20, padding: "4px 12px" }}>
+              <div style={{ width: 6, height: 6, borderRadius: "50%", background: C.green }} />
+              <span style={{ fontSize: 11, fontWeight: 600, color: C.green }}>Connected</span>
+            </div>
+            {onDisconnect && (
+              <button onClick={onDisconnect} style={{ fontSize: 11, fontWeight: 600, padding: "4px 10px", borderRadius: 20, border: `1px solid ${C.border2}`, background: C.bg2, color: C.text3, cursor: "pointer", fontFamily: font }}>
+                Disconnect
+              </button>
+            )}
+          </>
         ) : comingSoon ? (
           <span style={{ fontSize: 11, color: C.text4, background: C.bg3, border: `1px solid ${C.border2}`, borderRadius: 20, padding: "4px 12px" }}>Coming soon</span>
         ) : planRequired ? (
@@ -98,10 +113,15 @@ export default function SettingsPage() {
   const [purchaseCardAutoSend, setPurchaseCardAutoSend] = useState(false);
   const [purchaseGiftAutoSend, setPurchaseGiftAutoSend] = useState(false);
 
-    useEffect(() => {
-    // (removed — Stripe already loaded in layout.tsx)
+  // Connection state
+  const [googleConnected, setGoogleConnected] = useState(false);
+  const [microsoftConnected, setMicrosoftConnected] = useState(false);
+  const [googleEmail, setGoogleEmail] = useState<string | null>(null);
+  const [microsoftEmail, setMicrosoftEmail] = useState<string | null>(null);
+  const [primaryProvider, setPrimaryProvider] = useState<"google" | "microsoft">("google");
+  const [msBanner, setMsBanner] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
-    // Check payment method
+  useEffect(() => {
     fetch("/api/stripe/card-charge").then(r => r.json()).then(d => {
       if (d.has_payment_method) setPaymentMethod({ last4: d.last4, brand: d.brand });
     }).catch(() => {});
@@ -125,11 +145,18 @@ export default function SettingsPage() {
         setPurchaseGiftAutoSend(settings.purchase_gift_auto_send ?? false);
       }
       if (plan) setPlanData(plan);
+      if (me) {
+        setGoogleConnected(!!me.refresh_token);
+        setMicrosoftConnected(!!me.microsoft_refresh_token);
+        setGoogleEmail(me.google_account_email ?? null);
+        setMicrosoftEmail(me.microsoft_account_email ?? null);
+        setPrimaryProvider(me.primary_email_provider || "google");
+      }
       if (me?.card_profile) {
         const cp = me.card_profile;
         setCardSignoff(cp.signoff || "");
         setCardTone(cp.tone || "warm");
-         setCardThresholds(cp.auto_send_thresholds || [cp.auto_send_threshold] || [2]);
+        setCardThresholds(cp.auto_send_thresholds || [cp.auto_send_threshold] || [2]);
         setCardAutoSend(cp.auto_send_enabled || false);
         setCardTriggers(cp.triggers || ["birthday"]);
       }
@@ -137,8 +164,19 @@ export default function SettingsPage() {
     });
   }, []);
 
-        // Save card profile to tom_users
-   const handleSave = async () => {
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("ms_connected")) {
+      setMsBanner({ type: "success", text: "Microsoft account connected successfully." });
+      window.history.replaceState({}, "", "/settings");
+      setTimeout(() => setMsBanner(null), 5000);
+    } else if (params.get("ms_error")) {
+      setMsBanner({ type: "error", text: `Couldn't connect Microsoft: ${params.get("ms_error")}` });
+      window.history.replaceState({}, "", "/settings");
+    }
+  }, []);
+
+  const handleSave = async () => {
     setSaving(true);
     try {
       await fetch("/api/settings", {
@@ -185,6 +223,33 @@ export default function SettingsPage() {
       if (data.url) window.location.href = data.url;
     } catch {}
     setPortalLoading(false);
+  };
+
+  const handleConnectMicrosoft = () => {
+    window.location.href = "/api/auth/microsoft";
+  };
+
+  const handleDisconnectMicrosoft = async () => {
+    if (!confirm("Disconnect Microsoft account? You can reconnect anytime.")) return;
+    try {
+      await fetch("/api/auth/microsoft/disconnect", { method: "POST" });
+      setMicrosoftConnected(false);
+      setMicrosoftEmail(null);
+      if (primaryProvider === "microsoft") setPrimaryProvider("google");
+    } catch {
+      alert("Failed to disconnect — please try again.");
+    }
+  };
+
+  const handleSwitchPrimaryProvider = async (provider: "google" | "microsoft") => {
+    setPrimaryProvider(provider);
+    try {
+      await fetch("/api/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ primary_email_provider: provider }),
+      });
+    } catch {}
   };
 
   const plan = planData?.plan || "free";
@@ -270,7 +335,6 @@ export default function SettingsPage() {
 
           <div style={{ display: "flex", flexDirection: "column" as const, gap: 20 }}>
 
-            {/* ── Billing & Plan ── */}
             <Card title="Plan & Billing" subtitle="Manage your Humble Hello subscription">
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                 <div>
@@ -296,7 +360,6 @@ export default function SettingsPage() {
                 </div>
               </div>
 
-              {/* AI Draft usage */}
               {draftLimit !== -1 && (
                 <div>
                   <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
@@ -314,7 +377,6 @@ export default function SettingsPage() {
                 </div>
               )}
 
-             {/* Card payment method */}
               <div style={{ paddingTop: 8, borderTop: `1px solid ${C.border}` }}>
                 <div style={{ fontSize: 13, fontWeight: 700, color: C.text, marginBottom: 8 }}>Card Payment Method</div>
                 <div style={{ fontSize: 11, color: C.text3, marginBottom: 12 }}>Used to pay monthly subscription & $4.75 per handwritten card sent via Humble Hello.</div>
@@ -352,8 +414,6 @@ export default function SettingsPage() {
                         if (result.error) {
                           alert(result.error.message);
                         } else {
-                          const pm = result.setupIntent.payment_method;
-                          // Fetch updated payment method info
                           const pmRes = await fetch("/api/stripe/card-charge");
                           const pmData = await pmRes.json();
                           if (pmData.has_payment_method) {
@@ -374,13 +434,11 @@ export default function SettingsPage() {
                 )}
               </div>
 
-               <div style={{ fontSize: 12, color: C.text4, paddingTop: 8, borderTop: `1px solid ${C.border}` }}>
+              <div style={{ fontSize: 12, color: C.text4, paddingTop: 8, borderTop: `1px solid ${C.border}` }}>
                 Need more? <button onClick={() => router.push("/pricing")} style={{ background: "none", border: "none", color: C.terra, fontWeight: 600, cursor: "pointer", fontSize: 12, padding: 0 }}>View all plans →</button>
               </div>
             </Card>
 
-
-            {/* ── Card Profile ── */}
             <Card title="Card Profile" subtitle="How Humble Hello sends handwritten cards on your behalf">
               <div>
                 <label style={lStyle}>Sign-off name</label>
@@ -406,7 +464,7 @@ export default function SettingsPage() {
                   })}
                 </div>
               </div>
-                            <div>
+              <div>
                 <label style={lStyle}>Auto-send threshold</label>
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" as const }}>
                   {[
@@ -467,7 +525,6 @@ export default function SettingsPage() {
               </div>
             </Card>
 
-            {/* ── Engage Settings ── */}
             <Card title="Engage" subtitle="How Humble Hello surfaces contacts for outreach">
               <div>
                 <label style={lStyle}>Snooze duration</label>
@@ -485,7 +542,6 @@ export default function SettingsPage() {
               />
             </Card>
 
-            {/* ── Autonomy ── */}
             <Card title="Autonomy & Gifts" subtitle="Define when Humble Hello acts automatically vs asks for approval">
               <div>
                 <label style={lStyle}>Auto-order threshold</label>
@@ -531,7 +587,7 @@ export default function SettingsPage() {
                 </div>
               </div>
             </Card>
-{/* ── Purchase Triggers ── */}
+
             <Card title="Purchase Thank-You Automation" subtitle="Automatically thank contacts when they make a purchase">
               <div>
                 <label style={lStyle}>Send a thank-you card when purchase exceeds</label>
@@ -582,7 +638,6 @@ export default function SettingsPage() {
               </div>
             </Card>
 
-            {/* ── Notifications ── */}
             <Card title="Notifications" subtitle="How Humble Hello keeps you in the loop">
               <div style={{ marginTop: -8 }}>
                 <Toggle value={notifyEmail} onChange={setNotifyEmail} label="Email notifications" desc="Activity summaries and important alerts" />
@@ -590,20 +645,81 @@ export default function SettingsPage() {
               </div>
             </Card>
 
-{/* ── Connections ── */}
             <Card title="Connections" subtitle="Services connected to Humble Hello">
+              {msBanner && (
+                <div style={{
+                  background: msBanner.type === "success" ? C.greenLight : C.redLight,
+                  border: `1px solid ${msBanner.type === "success" ? C.green : C.red}44`,
+                  borderRadius: 8,
+                  padding: "10px 14px",
+                  fontSize: 12,
+                  color: msBanner.type === "success" ? C.green : C.red,
+                  fontWeight: 600,
+                  marginBottom: 8,
+                }}>
+                  {msBanner.type === "success" ? "✓ " : "⚠ "}{msBanner.text}
+                </div>
+              )}
+
               <div style={{ marginTop: -8 }}>
-                <ConnectionRow icon="G" name="Google" desc="Gmail · Calendar · Contacts" connected />
+                <ConnectionRow
+                  icon="G"
+                  name="Google"
+                  desc="Gmail · Calendar · Contacts"
+                  connected={googleConnected}
+                  accountEmail={googleEmail}
+                />
+                <ConnectionRow
+                  icon="M"
+                  name="Microsoft 365"
+                  desc="Outlook · Calendar · Contacts"
+                  connected={microsoftConnected}
+                  accountEmail={microsoftEmail}
+                  onConnect={handleConnectMicrosoft}
+                  onDisconnect={handleDisconnectMicrosoft}
+                />
                 <ConnectionRow icon="Z" name="ZoomInfo" desc="Contact enrichment & verification" connected />
                 <ConnectionRow icon="📮" name="Post.com" desc="Send physical cards to contacts" comingSoon />
                 <ConnectionRow icon="🎁" name="Humble Hello Marketplace" desc="Send gifts to contacts" comingSoon />
                 <ConnectionRow icon="H" name="HubSpot" desc="Export contacts to your CRM" comingSoon />
-                <ConnectionRow icon="S" name="Salesforce" desc="Export contacts to your CRM" comingSoon />  
-                
+                <ConnectionRow icon="S" name="Salesforce" desc="Export contacts to your CRM" comingSoon />
               </div>
+
+              {googleConnected && microsoftConnected && (
+                <div style={{ paddingTop: 16, borderTop: `1px solid ${C.border}`, marginTop: 4 }}>
+                  <label style={lStyle}>Primary email provider</label>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    {(["google", "microsoft"] as const).map(p => {
+                      const active = primaryProvider === p;
+                      const label = p === "google" ? "Google" : "Microsoft";
+                      return (
+                        <button
+                          key={p}
+                          onClick={() => handleSwitchPrimaryProvider(p)}
+                          style={{
+                            padding: "7px 16px",
+                            borderRadius: 20,
+                            border: `1.5px solid ${active ? C.terra : C.border2}`,
+                            background: active ? `${C.terra}18` : C.bg3,
+                            color: active ? C.terra : C.text3,
+                            fontSize: 12,
+                            fontWeight: active ? 700 : 400,
+                            cursor: "pointer",
+                            fontFamily: font,
+                          }}
+                        >
+                          {active ? "✓ " : ""}{label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div style={{ fontSize: 11, color: C.text4, marginTop: 4 }}>
+                    Cards, welcome emails, and campaigns send through this provider's mailbox.
+                  </div>
+                </div>
+              )}
             </Card>
 
-            {/* ── Data & Privacy ── */}
             <Card title="Data & Privacy" subtitle="Control your data and how it's used">
               <Toggle
                 value={networkOptIn}
@@ -626,7 +742,6 @@ export default function SettingsPage() {
               </button>
             </Card>
 
-            {/* ── Danger Zone ── */}
             <Card title="Danger Zone" subtitle="Irreversible actions — use with care">
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 0", borderBottom: `1px solid ${C.border}` }}>
                 <div>
@@ -669,7 +784,6 @@ export default function SettingsPage() {
         </div>
       </main>
 
-      {/* Save bar */}
       <div style={{ position: "fixed", bottom: 0, left: 200, right: 0, background: C.bg2, borderTop: `1px solid ${C.border}`, padding: "16px 40px", display: "flex", alignItems: "center", justifyContent: "space-between", zIndex: 100 }}>
         <div style={{ fontSize: 13, color: saved ? C.green : C.text3, fontWeight: saved ? 600 : 400 }}>
           {saved ? "✓ Settings saved" : "Make changes above and save"}

@@ -1,10 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import { sendUserEmail } from "@/app/lib/email-provider";
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-);
+function getSupabase() {
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!
+  );
+}
 
 export async function POST(req: NextRequest) {
   const { user_email, user_name, contact_name, occasion, message, days_until } = await req.json();
@@ -27,7 +30,8 @@ Review and approve here: ${approvalUrl}
 
 — Humble Hello`;
 
-  // Send via Gmail API using user's own token
+  // Look up the user by email so we know whose mailbox to send through
+  const supabase = getSupabase();
   const { data: userData } = await supabase
     .from("tom_users")
     .select("id")
@@ -36,22 +40,17 @@ Review and approve here: ${approvalUrl}
 
   if (!userData) return NextResponse.json({ ok: true });
 
-  const { getValidAccessToken } = await import("@/app/lib/google");
-  const accessToken = await getValidAccessToken(userData.id);
-
-  const raw = [
-    `To: ${user_email}`,
-    `Subject: Card approval needed — ${contact_name}'s ${occasion}`,
-    `Content-Type: text/plain; charset=utf-8`,
-    ``,
-    emailBody,
-  ].join("\r\n");
-
-  await fetch("https://gmail.googleapis.com/gmail/v1/users/me/messages/send", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ raw: Buffer.from(raw).toString("base64url") }),
-  });
+  try {
+    await sendUserEmail({
+      userId: userData.id,
+      to: user_email,
+      subject: `Card approval needed — ${contact_name}'s ${occasion}`,
+      text: emailBody,
+    });
+  } catch (e: any) {
+    console.error("Card notify send error:", e);
+    // Non-fatal — return ok so the upstream caller doesn't retry
+  }
 
   return NextResponse.json({ ok: true });
 }
