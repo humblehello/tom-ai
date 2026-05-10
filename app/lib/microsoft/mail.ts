@@ -27,16 +27,13 @@ export interface GraphMessage {
 
 export interface SendMailParams {
   to: string | string[];
+  toName?: string;          // ← add this
   cc?: string | string[];
   bcc?: string | string[];
   subject: string;
-  /** Plain text body. We send HTML to match Gmail HH footer styling. */
   html: string;
-  /** Optional plain-text fallback. Graph will derive from HTML if omitted. */
   text?: string;
-  /** Save to Sent Items (default true). */
   saveToSentItems?: boolean;
-  /** Optional reply-to address (defaults to mailbox). */
   replyTo?: string;
 }
 
@@ -70,7 +67,14 @@ export async function sendMicrosoftMail(
 
 function toRecipientList(addrs: string | string[]): GraphRecipient[] {
   const arr = Array.isArray(addrs) ? addrs : [addrs];
-  return arr.map((address) => ({ emailAddress: { address } }));
+  return arr.map((raw) => {
+    // Accept "Name <email@x.com>" envelope syntax or bare "email@x.com"
+    const match = raw.match(/^\s*(.+?)\s*<([^>]+)>\s*$/);
+    if (match) {
+      return { emailAddress: { name: match[1].trim(), address: match[2].trim() } };
+    }
+    return { emailAddress: { address: raw.trim() } };
+  });
 }
 
 // ---------------------------------------------------------------------------

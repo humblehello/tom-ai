@@ -28,15 +28,18 @@ export async function GET(req: NextRequest) {
 const group1 = users.flatMap(user => [
   { name: "tom/scheduled.emails",     data: { userId: user.id } },
   { name: "tom/contacts.score",       data: { userId: user.id } },
-  { name: "tom/contacts.auto-merge",  data: { userId: user.id } },
+  // Auto-merge disabled 2026-05 — function no longer exists
+// { name: "tom/contacts.auto-merge",  data: { userId: user.id } },,
+  { name: "tom/verifications.send",   data: { userId: user.id } },
 ]);
 
   // ── Group 2 (10s): Gmail API only ──
-  const group2 = users.flatMap(user => [
-    { name: "tom/gmail.backfill",   data: { userId: user.id } },
-    { name: "tom/emails.scan",      data: { userId: user.id } },
-    { name: "tom/signatures.parse", data: { userId: user.id } },
-  ]);
+ const group2 = users.flatMap(user => [
+  { name: "tom/gmail.backfill",         data: { userId: user.id } },
+  { name: "tom/emails.scan",            data: { userId: user.id } },
+  { name: "tom/signatures.parse",       data: { userId: user.id } },
+  { name: "tom/verifications.parse",    data: { userId: user.id } },
+]);
 
   // ── Group 3 (30s): People API — contacts sync + backfill ──
   const group3 = users.flatMap(user => [

@@ -12,7 +12,6 @@ import {
   contactsSync,
   scheduledEmailSend,
   googleBackfill,
-  autoMerge,
   hopperImport,
   bounceScan,
   cardBirthdayScanner,
@@ -27,6 +26,9 @@ import {
   microsoftMailScan,
   microsoftContactsSync,
   microsoftCalendarScan,
+  microsoftBackfill,
+  verificationsSend,
+  verificationsParse,
 } from "../../lib/inngest-functions";
 
 export const { GET, POST, PUT } = serve({
@@ -43,7 +45,6 @@ export const { GET, POST, PUT } = serve({
     contactsSync,
     scheduledEmailSend,
     googleBackfill,
-    autoMerge,
     hopperImport,
     bounceScan,
     cardBirthdayScanner,
@@ -58,5 +59,8 @@ export const { GET, POST, PUT } = serve({
     microsoftMailScan,
     microsoftContactsSync,
     microsoftCalendarScan,
+    microsoftBackfill,
+    verificationsSend,
+    verificationsParse,
   ],
 });

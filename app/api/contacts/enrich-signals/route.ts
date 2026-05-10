@@ -4,6 +4,7 @@ import { createClient } from "@supabase/supabase-js";
 import { getValidAccessToken } from "../../../lib/google";
 import { createGoogleContact } from "../../../lib/googleContacts";
 import { contactImportGuard } from "../../../lib/contactGuard";
+import { isBlockedEmail } from "@/app/lib/contact-blocklist";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -187,12 +188,13 @@ async function createContactsFromInbox(userId: string, accessToken: string) {
       if (!emailMatch) continue;
       const email = emailMatch[1].toLowerCase().trim();
        if (!email || email.includes(ownEmail)) continue;
-      const JUNK_LOCAL = ["noreply","no-reply","donotreply","support","accountservices","account","marketing","productmarketing","account=services","customer","customer.care","customercare","reply","client","clientservices","notifications","notification","newsletter","updates","alerts","mailer","marketing","hello","customer","reply","automated","system","bot"];
+      // Local-part blocklist moved to app/lib/contact-blocklist.ts (substring match)
+      if (isBlockedEmail(email)) continue;
+
+      // Domain-level blocklists kept inline (these are sending-infrastructure domains, not local-part keywords)
       const JUNK_DOMAIN_PREFIXES = ["mail.","email.","send.","msg.","ifly.","em.","t.","notify.","notification.","engagement.","welcome.","e-exclusive.","card.","business.","reply."];
       const JUNK_SENDING_DOMAINS = ["substack.com","mailchimp.com","sendgrid.net","constantcontact.com","amazonses.com","shadow.outlook.com","mindbodyonline.com","pacers-mail.com","fyxer.com"];
-      const localPart = email.split("@")[0];
       const domain = email.split("@")[1] || "";
-      if (JUNK_LOCAL.some(j => localPart === j)) continue; // exact match only, not includes
       if (JUNK_SENDING_DOMAINS.some(j => domain === j)) continue;
       if (JUNK_DOMAIN_PREFIXES.some(j => domain.startsWith(j))) continue;
 

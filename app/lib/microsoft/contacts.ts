@@ -59,6 +59,11 @@ export async function syncMicrosoftContacts(
   userId: string,
   deltaLink: string | null
 ): Promise<ContactsSyncResult> {
+  // Kept for backward compatibility, but DO NOT call this from cron paths —
+  // it paginates the entire delta and can take 5+ minutes for large accounts.
+  // Use syncMicrosoftContactsPage instead, which processes one page per call.
+  console.warn("syncMicrosoftContacts: full-pagination version called — prefer syncMicrosoftContactsPage for cron use");
+
   const startUrl = deltaLink ?? '/me/contacts/delta?$top=100';
 
   const upserted: GraphContact[] = [];
@@ -84,6 +89,57 @@ export async function syncMicrosoftContacts(
   }
 
   return { upserted, deleted, newDeltaLink };
+}
+
+// ---------------------------------------------------------------------------
+// Single-page version — for use in Inngest cron paths
+// Each call processes ONE page (~100 contacts). Returns nextLink to continue,
+// or newDeltaLink if done. The caller passes nextLink back on the next run.
+// ---------------------------------------------------------------------------
+
+export interface ContactsPageResult {
+  upserted: GraphContact[];
+  deleted: string[];
+  /** If set, more pages exist — call again with this as the cursor */
+  nextLink?: string;
+  /** If set, sync is complete — save this as the new delta link */
+  newDeltaLink?: string;
+}
+
+export async function syncMicrosoftContactsPage(
+  userId: string,
+  cursor: string | null
+): Promise<ContactsPageResult> {
+  // cursor = null on first run → use deltaLink from user record OR start fresh
+  // cursor = a nextLink → continue from that page
+  const url = cursor ?? '/me/contacts/delta?$top=100';
+
+  const res = await graphFetch<{
+    value: GraphContact[];
+    '@odata.nextLink'?: string;
+    '@odata.deltaLink'?: string;
+  }>(userId, url, {
+    method: 'GET',
+    absoluteUrl: url.startsWith('https://'),
+  });
+
+  const upserted: GraphContact[] = [];
+  const deleted: string[] = [];
+
+  for (const contact of res.value || []) {
+    if (contact['@removed']?.reason === 'deleted') {
+      deleted.push(contact.id);
+    } else {
+      upserted.push(contact);
+    }
+  }
+
+  return {
+    upserted,
+    deleted,
+    nextLink: res['@odata.nextLink'],
+    newDeltaLink: res['@odata.deltaLink'],
+  };
 }
 
 // ---------------------------------------------------------------------------

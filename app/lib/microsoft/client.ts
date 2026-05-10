@@ -1,6 +1,6 @@
 import { ConfidentialClientApplication, type AuthenticationResult } from '@azure/msal-node';
 import { createClient } from '@supabase/supabase-js';
-import { MICROSOFT_SCOPES } from './scopes';
+import { MICROSOFT_AUTH_SCOPES, MICROSOFT_REFRESH_SCOPES } from './scopes';
 
 // ---------------------------------------------------------------------------
 // MSAL confidential client (multi-tenant + personal accounts via `common`)
@@ -47,7 +47,7 @@ function getSupabaseAdmin() {
 
 export function getAuthCodeUrl(state: string): Promise<string> {
   return getMsalClient().getAuthCodeUrl({
-    scopes: [...MICROSOFT_SCOPES],
+    scopes: [...MICROSOFT_AUTH_SCOPES],
     redirectUri: process.env.MICROSOFT_REDIRECT_URI!,
     state,
     prompt: 'select_account',
@@ -57,7 +57,7 @@ export function getAuthCodeUrl(state: string): Promise<string> {
 export async function acquireTokenByCode(code: string): Promise<AuthenticationResult> {
   const result = await getMsalClient().acquireTokenByCode({
     code,
-    scopes: [...MICROSOFT_SCOPES],
+    scopes: [...MICROSOFT_AUTH_SCOPES],
     redirectUri: process.env.MICROSOFT_REDIRECT_URI!,
   });
   if (!result) throw new Error('MSAL returned null token result');
@@ -109,7 +109,7 @@ async function refreshMicrosoftAccessToken(
     client_secret: process.env.MICROSOFT_CLIENT_SECRET!,
     refresh_token: refreshToken,
     grant_type: 'refresh_token',
-    scope: MICROSOFT_SCOPES.join(' '),
+    scope: MICROSOFT_REFRESH_SCOPES.join(' '),
   });
 
   const res = await fetch('https://login.microsoftonline.com/common/oauth2/v2.0/token', {

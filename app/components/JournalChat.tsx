@@ -12,7 +12,12 @@ type JournalState = "idle" | "chatting" | "extracting" | "saving" | "done";
 
 type Props = { autoStart?: boolean };
 
+import { useIsMobile } from "@/app/lib/useMediaQuery";
+// ... at the top of the file ...
+
 export default function JournalChat({ autoStart }: Props) {
+  const isMobile = useIsMobile();
+
   const [state, setState] = useState<JournalState>("idle");
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -249,35 +254,91 @@ export default function JournalChat({ autoStart }: Props) {
 
   // ── Chat ────────────────────────────────────────────────────────────────
   return (
-    <div style={{ background: C.bg2, border: `1px solid ${C.border}`, borderRadius: 12, overflow: "hidden", display: "flex", flexDirection: "column" as const }}>
+    <div style={{
+      background: C.bg2,
+      border: isMobile ? "none" : `1px solid ${C.border}`,
+      borderRadius: isMobile ? 0 : 12,
+      overflow: "hidden",
+      display: "flex",
+      flexDirection: "column" as const,
+      // Mobile: full-viewport pinned, so input bar stays at the bottom
+      position: isMobile ? "fixed" as const : "relative" as const,
+      top: isMobile ? 0 : "auto",
+      left: isMobile ? 0 : "auto",
+      right: isMobile ? 0 : "auto",
+      bottom: isMobile ? 0 : "auto",
+      height: isMobile ? "100dvh" : "auto",
+      zIndex: isMobile ? 100 : "auto",
+    }}>
       {/* Header */}
-      <div style={{ padding: "12px 16px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", justifyContent: "space-between", background: C.bg3 }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <div style={{ width: 8, height: 8, borderRadius: "50%", background: C.green }} />
-          <span style={{ fontSize: 13, fontWeight: 600, color: C.text }}>Relationship Journal</span>
-          {theme && (
+      <div style={{
+        padding: isMobile ? "10px 14px" : "12px 16px",
+        borderBottom: `1px solid ${C.border}`,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        background: C.bg3,
+        flexShrink: 0,
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0, flex: 1 }}>
+          <div style={{ width: 8, height: 8, borderRadius: "50%", background: C.green, flexShrink: 0 }} />
+          <span style={{ fontSize: 13, fontWeight: 600, color: C.text, whiteSpace: "nowrap" as const, overflow: "hidden" as const, textOverflow: "ellipsis" as const }}>
+            {isMobile ? "Journal" : "Relationship Journal"}
+          </span>
+          {theme && !isMobile && (
             <span style={{ fontSize: 10, padding: "2px 8px", borderRadius: 20, background: C.purpleLight, color: C.purple, fontWeight: 600, textTransform: "capitalize" as const }}>
               {theme.replace(/_/g, " ")}
             </span>
           )}
         </div>
-        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-          {themesRemaining !== null && <span style={{ fontSize: 10, color: C.text4 }}>{themesRemaining} topics remaining</span>}
+        <div style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
+          {themesRemaining !== null && !isMobile && (
+            <span style={{ fontSize: 10, color: C.text4 }}>{themesRemaining} topics remaining</span>
+          )}
           {messages.length >= 4 && (
             <button onClick={extractAndSave}
-              style={{ fontSize: 11, padding: "6px 12px", borderRadius: 6, border: "none", background: C.purple, color: "#fff", cursor: "pointer", fontWeight: 600, fontFamily: font }}>
-              Save & update contacts
+              style={{
+                fontSize: 11,
+                padding: isMobile ? "6px 10px" : "6px 12px",
+                borderRadius: 6,
+                border: "none",
+                background: C.purple,
+                color: "#fff",
+                cursor: "pointer",
+                fontWeight: 600,
+                fontFamily: font,
+              }}>
+              {isMobile ? "Save" : "Save & update contacts"}
             </button>
           )}
           <button onClick={reset}
-            style={{ fontSize: 11, padding: "6px 10px", borderRadius: 6, border: `1px solid ${C.border2}`, background: "transparent", color: C.text3, cursor: "pointer", fontFamily: font }}>
+            style={{
+              fontSize: 11,
+              padding: isMobile ? "6px 10px" : "6px 10px",
+              borderRadius: 6,
+              border: `1px solid ${C.border2}`,
+              background: "transparent",
+              color: C.text3,
+              cursor: "pointer",
+              fontFamily: font,
+            }}>
             Close
           </button>
         </div>
       </div>
 
       {/* Messages */}
-      <div style={{ flex: 1, overflowY: "auto" as const, padding: 16, display: "flex", flexDirection: "column" as const, gap: 12, maxHeight: 440, minHeight: 320 }}>
+      <div style={{
+        flex: 1,
+        overflowY: "auto" as const,
+        WebkitOverflowScrolling: "touch" as const,
+        padding: isMobile ? "12px 14px" : 16,
+        display: "flex",
+        flexDirection: "column" as const,
+        gap: 12,
+        maxHeight: isMobile ? "none" : 440,
+        minHeight: isMobile ? 0 : 320,
+      }}>
         {messages.map((msg, i) => (
           <div key={i} style={{ display: "flex", justifyContent: msg.role === "user" ? "flex-end" : "flex-start", alignItems: "flex-end", gap: 8 }}>
             {msg.role === "assistant" && (
@@ -298,20 +359,54 @@ export default function JournalChat({ autoStart }: Props) {
       </div>
 
       {/* Input */}
-      <div style={{ padding: "12px 16px", borderTop: `1px solid ${C.border}`, display: "flex", gap: 8, alignItems: "flex-end", background: C.bg2 }}>
+      <div style={{
+        padding: isMobile ? "10px 12px calc(10px + env(safe-area-inset-bottom))" : "12px 16px",
+        borderTop: `1px solid ${C.border}`,
+        display: "flex",
+        gap: 8,
+        alignItems: "flex-end",
+        background: C.bg2,
+        flexShrink: 0,
+      }}>
         <textarea
           ref={inputRef}
           value={input}
           onChange={e => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Type your answer... (Enter to send)"
-          rows={2}
-          style={{ flex: 1, padding: "10px 14px", borderRadius: 10, border: `1px solid ${C.border2}`, background: C.bg3, color: C.text, fontSize: 13, fontFamily: font, resize: "none" as const, outline: "none", lineHeight: 1.5 }}
+          placeholder={isMobile ? "Type a message..." : "Type your answer... (Enter to send)"}
+          rows={isMobile ? 1 : 2}
+          style={{
+            flex: 1,
+            padding: isMobile ? "10px 12px" : "10px 14px",
+            borderRadius: 10,
+            border: `1px solid ${C.border2}`,
+            background: C.bg3,
+            color: C.text,
+            fontSize: isMobile ? 16 : 13,  // 16px on mobile prevents iOS zoom-on-focus
+            fontFamily: font,
+            resize: "none" as const,
+            outline: "none",
+            lineHeight: 1.5,
+            maxHeight: isMobile ? 100 : 200,
+          }}
           onFocus={e => (e.currentTarget.style.borderColor = C.purple)}
           onBlur={e => (e.currentTarget.style.borderColor = C.border2)}
         />
         <button onClick={sendMessage} disabled={!input.trim() || sending}
-          style={{ padding: "10px 18px", borderRadius: 10, border: "none", background: input.trim() && !sending ? C.purple : C.bg3, color: input.trim() && !sending ? "#fff" : C.text4, fontSize: 13, fontWeight: 600, cursor: input.trim() && !sending ? "pointer" : "default", fontFamily: font, flexShrink: 0 }}>
+          style={{
+            padding: isMobile ? "10px 14px" : "10px 18px",
+            borderRadius: 10,
+            border: "none",
+            background: input.trim() && !sending ? C.purple : C.bg3,
+            color: input.trim() && !sending ? "#fff" : C.text4,
+            fontSize: isMobile ? 14 : 13,
+            fontWeight: 600,
+            cursor: input.trim() && !sending ? "pointer" : "default",
+            fontFamily: font,
+            flexShrink: 0,
+            minWidth: isMobile ? 60 : "auto",
+            minHeight: isMobile ? 44 : "auto",
+          }}>
           Send
         </button>
       </div>

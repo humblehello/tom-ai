@@ -59,7 +59,7 @@ export default function UpgradeModal({ reason, onClose }: { reason: string; onCl
           <button onClick={onClose} style={{ flex: 1, padding: "10px", borderRadius: 8, border: `1px solid ${C.border2}`, background: C.bg2, color: C.text2, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: font }}>
             {isTrialExpired ? "Use free plan" : "Maybe later"}
           </button>
-          <button onClick={() => { onClose(); router.push("/pricing"); }} style={{ flex: 1, padding: "10px", borderRadius: 8, border: "none", background: C.terra, color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: font }}>
+          <button onClick={() => { onClose(); router.push("/plans"); }} style={{ flex: 1, padding: "10px", borderRadius: 8, border: "none", background: C.terra, color: "#fff", fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: font }}>
             Upgrade now
           </button>
         </div>

@@ -23,7 +23,7 @@ function getPlanFromPriceId(priceId: string): { plan: string; limit: number; dra
     return { plan: "pro", limit: 2500, drafts: 250 };
   }
   if (priceId === growthMonthly || priceId === growthAnnual) {
-    return { plan: "growth", limit: 5000, drafts: -1 }; // -1 = unlimited
+    return { plan: "growth", limit: 5000, drafts: -1 };
   }
   return { plan: "free", limit: 1000, drafts: 100 };
 }
@@ -44,6 +44,8 @@ export async function POST(req: NextRequest) {
   }
 
   switch (event.type) {
+
+    // ── Checkout completed (new subscription) ─────────────────────────────
     case "checkout.session.completed": {
       const session = event.data.object as Stripe.Checkout.Session;
       const userId = session.metadata?.supabase_user_id;
@@ -53,18 +55,40 @@ export async function POST(req: NextRequest) {
       const priceId = subscription.items.data[0].price.id;
       const { plan, limit } = getPlanFromPriceId(priceId);
 
-      await supabase.from("tom_users").update({
+      // Detect if subscription is in trial
+      const isTrialing = subscription.status === "trialing";
+      const periodEnd = (subscription as any).current_period_end
+        ? new Date((subscription as any).current_period_end * 1000).toISOString()
+        : null;
+
+      const updates: any = {
         plan,
         stripe_subscription_id: subscription.id,
         plan_contact_limit: limit,
         plan_updated_at: new Date().toISOString(),
-        trial_ends_at: null,
+        subscription_status: subscription.status,
+        subscription_cancel_at_period_end: subscription.cancel_at_period_end || false,
+        subscription_period_end: periodEnd,
         ai_drafts_used: 0,
         ai_drafts_reset_at: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-      }).eq("id", userId);
+      };
+
+      // If subscription is trialing, mark trial_used_at NOW (so they can't trial again later)
+      if (isTrialing) {
+        updates.trial_used_at = new Date().toISOString();
+        updates.trial_ends_at = (subscription as any).trial_end
+          ? new Date((subscription as any).trial_end * 1000).toISOString()
+          : null;
+      } else {
+        // Non-trial = converted to paid immediately or trial-ineligible flow
+        updates.trial_ends_at = null;
+      }
+
+      await supabase.from("tom_users").update(updates).eq("id", userId);
       break;
     }
 
+    // ── Subscription updated (renewal, plan change, cancel-at-period-end) ─
     case "customer.subscription.updated": {
       const subscription = event.data.object as Stripe.Subscription;
       const userId = subscription.metadata?.supabase_user_id;
@@ -73,17 +97,34 @@ export async function POST(req: NextRequest) {
       const priceId = subscription.items.data[0].price.id;
       const { plan, limit } = getPlanFromPriceId(priceId);
       const status = subscription.status;
+      const periodEnd = (subscription as any).current_period_end
+        ? new Date((subscription as any).current_period_end * 1000).toISOString()
+        : null;
 
+      // Active or trialing → user has access at this plan tier
       if (status === "active" || status === "trialing") {
-        await supabase.from("tom_users").update({
+        const updates: any = {
           plan,
           plan_contact_limit: limit,
           plan_updated_at: new Date().toISOString(),
-        }).eq("id", userId);
+          subscription_status: status,
+          subscription_cancel_at_period_end: subscription.cancel_at_period_end || false,
+          subscription_period_end: periodEnd,
+        };
+
+        if (status === "trialing") {
+          updates.trial_used_at = new Date().toISOString();
+          updates.trial_ends_at = (subscription as any).trial_end
+            ? new Date((subscription as any).trial_end * 1000).toISOString()
+            : null;
+        }
+
+        await supabase.from("tom_users").update(updates).eq("id", userId);
       }
       break;
     }
 
+    // ── Subscription fully ended (period elapsed after cancel, or trial ended) ─
     case "customer.subscription.deleted": {
       const subscription = event.data.object as Stripe.Subscription;
       const userId = subscription.metadata?.supabase_user_id;
@@ -94,10 +135,16 @@ export async function POST(req: NextRequest) {
         stripe_subscription_id: null,
         plan_contact_limit: 1000,
         plan_updated_at: new Date().toISOString(),
+        subscription_status: "canceled",
+        subscription_cancel_at_period_end: false,
+        subscription_period_end: null,
+        trial_ends_at: null,
+        // NOTE: trial_used_at stays set so they can't trial again
       }).eq("id", userId);
       break;
     }
 
+    // ── Payment failed (card declined etc.) ────────────────────────────────
     case "invoice.payment_failed": {
       const invoice = event.data.object as Stripe.Invoice;
       const customerId = invoice.customer as string;
@@ -110,6 +157,7 @@ export async function POST(req: NextRequest) {
         await supabase.from("tom_users").update({
           plan: "free",
           plan_contact_limit: 1000,
+          subscription_status: "past_due",
         }).eq("id", user.id);
       }
       break;

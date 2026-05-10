@@ -3,8 +3,10 @@ import { cookies } from "next/headers";
 import { createClient } from "@supabase/supabase-js";
 import crypto from "crypto";
 import { buildVerificationEmail } from "../../../lib/email-template";
+import { sendUserEmail } from "../../../lib/email-provider";
 
 const DAILY_SEND_LIMIT = 20;
+const DAILY_COLD_LIMIT = 5;
 const SEND_DELAY_MS = 10000;
 
 // Sequence timing
@@ -65,7 +67,6 @@ function sleep(ms: number) {
 function isEligibleForVerification(contact: any): { eligible: boolean; reason?: string } {
   const now = new Date();
 
-  // 1. Skip if verified within 18 months
   if (contact.verified_at) {
     const verifiedAt = new Date(contact.verified_at);
     const monthsSinceVerified = (now.getTime() - verifiedAt.getTime()) / (1000 * 60 * 60 * 24 * 30);
@@ -74,7 +75,6 @@ function isEligibleForVerification(contact: any): { eligible: boolean; reason?: 
     }
   }
 
-  // 2. Skip if next_eligible_at is in the future
   if (contact.verification_next_eligible_at) {
     const nextEligible = new Date(contact.verification_next_eligible_at);
     if (nextEligible > now) {
@@ -82,14 +82,12 @@ function isEligibleForVerification(contact: any): { eligible: boolean; reason?: 
     }
   }
 
-  // 3. Skip if max attempts reached and not yet re-enrolled
   if ((contact.verification_attempts || 0) >= MAX_ATTEMPTS) {
     if (contact.verification_sequence_reset_at) {
       const resetAt = new Date(contact.verification_sequence_reset_at);
       if (resetAt > now) {
         return { eligible: false, reason: "sequence complete — re-enrolls in 12 months" };
       }
-      // Re-enrollment time has passed — reset attempts and allow
     } else {
       return { eligible: false, reason: "max attempts reached" };
     }
@@ -109,11 +107,11 @@ export async function POST(req: NextRequest) {
   if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   const body = await req.json().catch(() => ({}));
-  const { contactIds, draftOnly = false } = body;
+  const { contactIds, draftOnly = false, batch_size } = body;
 
   const { data: user } = await supabase
     .from("tom_users")
-    .select("access_token, name, email")
+    .select("name, email")
     .eq("id", userId)
     .single();
 
@@ -139,11 +137,21 @@ export async function POST(req: NextRequest) {
     });
   }
 
+  // Count cold-contact sends today (separate sub-cap to protect domain reputation)
+  const { count: coldSentToday } = await supabase
+    .from("tom_verifications")
+    .select("*, tom_contacts!inner(email_count)", { count: "exact", head: true })
+    .eq("user_id", userId)
+    .eq("status", "sent")
+    .gte("sent_at", todayStart.toISOString())
+    .or("email_count.is.null,email_count.eq.0", { foreignTable: "tom_contacts" });
+
+  let remainingColdQuota = DAILY_COLD_LIMIT - (coldSentToday || 0);
+
   // Get contacts to verify
   let contacts: any[] = [];
 
   if (contactIds?.length > 0) {
-    // Manual send — specific contacts
     const { data } = await supabase
       .from("tom_contacts")
       .select("*")
@@ -152,7 +160,6 @@ export async function POST(req: NextRequest) {
       .not("email", "is", null);
     contacts = data || [];
   } else {
-    // Auto send — randomized eligible contacts
     const now = new Date();
     const eighteenMonthsAgo = new Date();
     eighteenMonthsAgo.setMonth(eighteenMonthsAgo.getMonth() - LOCK_AFTER_VERIFIED_MONTHS);
@@ -165,11 +172,11 @@ export async function POST(req: NextRequest) {
       .or(`verified_at.is.null,verified_at.lt.${eighteenMonthsAgo.toISOString()}`)
       .or(`verification_next_eligible_at.is.null,verification_next_eligible_at.lt.${now.toISOString()}`)
       .lt("verification_attempts", MAX_ATTEMPTS)
-      .limit(200); // Pull more than needed so we can randomize
+      .limit(200);
 
-    // Randomize and take what we need
     const shuffled = (data || []).sort(() => Math.random() - 0.5);
-    contacts = shuffled.slice(0, remainingQuota * 3); // Take 3x to account for ineligible
+    const targetCount = Math.min(batch_size || remainingQuota, remainingQuota);
+    contacts = shuffled.slice(0, targetCount * 3);
   }
 
   if (!contacts?.length) {
@@ -180,22 +187,24 @@ export async function POST(req: NextRequest) {
   let drafted = 0;
   let skipped = 0;
   const drafts: any[] = [];
+  const skipReasons: { contact_id: string; contact_name: string; reason?: string }[] = [];
 
   const senderFirstName = user.name?.split(" ")[0] || "there";
   const senderFullName = user.name || "";
   const appUrl = process.env.NEXT_PUBLIC_APP_URL || "https://humblehello.com";
 
-  for (const contact of contacts) {
-    if (sent >= remainingQuota) break;
+  const targetSendCount = Math.min(batch_size || remainingQuota, remainingQuota);
 
-    // Check eligibility
+  for (const contact of contacts) {
+    if (sent >= targetSendCount) break;
+
     const { eligible, reason } = isEligibleForVerification(contact);
     if (!eligible) {
       skipped++;
+      skipReasons.push({ contact_id: contact.id, contact_name: contact.full_name, reason });
       continue;
     }
 
-    // If re-enrollment window has passed, reset attempts
     const attemptNumber = contact.verification_attempts || 0;
     if (attemptNumber >= MAX_ATTEMPTS && contact.verification_sequence_reset_at) {
       const resetAt = new Date(contact.verification_sequence_reset_at);
@@ -211,13 +220,23 @@ export async function POST(req: NextRequest) {
     const currentAttempt = (contact.verification_attempts || 0) + 1;
     const token = crypto.randomBytes(32).toString("hex");
     const verifyUrl = `${appUrl}/verify/${token}`;
-    const hasEmailHistory = contact.email_count && contact.email_count >= 1;
-    const shouldAutoSend = !draftOnly && hasEmailHistory;
+    const isCold = !contact.email_count || contact.email_count < 1;
+
+    if (isCold && remainingColdQuota <= 0) {
+      skipped++;
+      skipReasons.push({
+        contact_id: contact.id,
+        contact_name: contact.full_name,
+        reason: `cold-contact daily limit reached (${DAILY_COLD_LIMIT}/day) — try again tomorrow`,
+      });
+      continue;
+    }
+
+    const shouldAutoSend = !draftOnly;
     const contactFirstName = contact.full_name?.split(" ")[0] || "there";
     const emailSubject = getRandomSubject(currentAttempt);
     const emailOpener = getRandomOpener(currentAttempt);
 
-    // Calculate next eligible date based on attempt number
     const nextEligible = new Date();
     if (currentAttempt === 1) {
       nextEligible.setDate(nextEligible.getDate() + ATTEMPT_2_WAIT_DAYS);
@@ -225,7 +244,6 @@ export async function POST(req: NextRequest) {
       nextEligible.setDate(nextEligible.getDate() + ATTEMPT_3_WAIT_DAYS);
     }
 
-    // Calculate sequence reset date if this is the final attempt
     const sequenceResetAt = currentAttempt >= MAX_ATTEMPTS
       ? new Date(Date.now() + REENROLL_AFTER_MONTHS * 30 * 24 * 60 * 60 * 1000)
       : null;
@@ -272,42 +290,22 @@ Sent via Humble Hello (${appUrl})`;
     });
 
     if (shouldAutoSend) {
-      const boundary = `boundary_${Date.now()}`;
-      const emailLines = [
-        `To: ${contact.full_name} <${contact.email}>`,
-        `From: ${user.name} <${user.email}>`,
-        `Subject: ${emailSubject}`,
-        `MIME-Version: 1.0`,
-        `Content-Type: multipart/alternative; boundary="${boundary}"`,
-        ``,
-        `--${boundary}`,
-        `Content-Type: text/plain; charset=utf-8`,
-        ``,
-        textBody,
-        ``,
-        `--${boundary}`,
-        `Content-Type: text/html; charset=utf-8`,
-        ``,
-        htmlBody,
-        ``,
-        `--${boundary}--`,
-      ].join("\r\n");
+      let sendOk = false;
+      try {
+        await sendUserEmail({
+          userId,
+          to: `${contact.full_name} <${contact.email}>`,
+          subject: emailSubject,
+          text: textBody,
+          html: htmlBody,
+          fromName: user.name || undefined,
+        });
+        sendOk = true;
+      } catch (err) {
+        console.error(`Verification send failed for contact ${contact.id}:`, err);
+      }
 
-      const encoded = Buffer.from(emailLines).toString("base64url");
-
-      const gmailRes = await fetch(
-        "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${user.access_token}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ raw: encoded }),
-        }
-      );
-
-      if (gmailRes.ok) {
+      if (sendOk) {
         await supabase
           .from("tom_contacts")
           .update({
@@ -320,6 +318,7 @@ Sent via Humble Hello (${appUrl})`;
           .eq("id", contact.id);
 
         sent++;
+        if (isCold) remainingColdQuota--;
         if (sent < remainingQuota) await sleep(SEND_DELAY_MS);
       }
     } else {
@@ -335,6 +334,16 @@ Sent via Humble Hello (${appUrl})`;
     }
   }
 
+  let message: string | undefined;
+  if (sent > 0) {
+    message = `Sent ${sent} emails · ${remainingQuota - sent} remaining today`;
+  } else if (skipReasons.length === 1) {
+    const r = skipReasons[0];
+    message = `Skipped ${r.contact_name}: ${r.reason || "not eligible right now"}`;
+  } else if (skipReasons.length > 1) {
+    message = `Skipped ${skipReasons.length} contacts (most recent: ${skipReasons[0].reason})`;
+  }
+
   return NextResponse.json({
     success: true,
     sent,
@@ -342,6 +351,7 @@ Sent via Humble Hello (${appUrl})`;
     skipped,
     remaining_quota_today: remainingQuota - sent,
     drafts: drafts.slice(0, 5),
-    message: sent > 0 ? `Sent ${sent} emails · ${remainingQuota - sent} remaining today` : undefined,
+    skip_reasons: skipReasons,
+    message,
   });
 }

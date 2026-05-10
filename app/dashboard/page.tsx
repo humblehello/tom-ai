@@ -1242,28 +1242,9 @@ export default function Dashboard() {
     setRefreshing(false);
   };
 
-  const handleDismiss = (id: string) => {
-    // Add to dismissed set (for filtering on future rebuilds / page loads)
-    const next = new Set(dismissedIds);
-    next.add(id);
-    setDismissedIds(next);
-
-    // Just remove the one card from the current view — NO reshuffle.
-    // This preserves the order of the other 11 cards and makes the dismiss
-    // feel like a precision action rather than a full page refresh.
-    setReengageContacts(prev => prev.filter(c => c.id !== id));
-
-    // Persist with expiry so the contact stays dismissed across page loads.
-    // Guard against snoozeDays being 0 or null (which would cause immediate
-    // expiry). Minimum 1 day.
-    try {
-      const days = Math.max(1, snoozeDays || 10);
-      const stored = localStorage.getItem("engage_dismissed");
-      const existing: { id: string; until: number }[] = stored ? JSON.parse(stored) : [];
-      const filtered = existing.filter(d => d.id !== id && d.until > Date.now());
-      filtered.push({ id, until: Date.now() + days * 24 * 60 * 60 * 1000 });
-      localStorage.setItem("engage_dismissed", JSON.stringify(filtered));
-    } catch {}
+const handleDismiss = (id: string) => {
+    // X button = "pause" action with user's custom snooze duration from settings
+    handleEngageAction(id, "pause");
   };
 
   const handleLogTouch = async (id: string, method: string = "Other") => {
@@ -1282,6 +1263,11 @@ export default function Dashboard() {
       if (c.id !== id) return c;
       const now = Date.now();
       switch (action) {
+        case "pause": {
+          // User's custom snooze duration from settings (default 10 days)
+          const days = Math.max(1, Math.min(365, snoozeDays || 10));
+          return { ...c, engage_snoozed_until: new Date(now + days * 86400000).toISOString() };
+        }
         case "pause_30":
           return { ...c, engage_snoozed_until: new Date(now + 30 * 86400000).toISOString() };
         case "snooze_1year":
@@ -1294,12 +1280,16 @@ export default function Dashboard() {
     }));
     setReengageContacts(prev => prev.filter(c => c.id !== id));
 
-    // Persist to DB
+    // Persist to DB. For "pause" action, send the user's snoozeDays preference.
     try {
+      const payload: any = { contact_id: id, action };
+      if (action === "pause") {
+        payload.days = Math.max(1, Math.min(365, snoozeDays || 10));
+      }
       await fetch("/api/contacts/engage-action", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ contact_id: id, action }),
+        body: JSON.stringify(payload),
       });
     } catch (e) {
       console.error("engage-action failed:", e);
@@ -1528,10 +1518,13 @@ const handleDelete = async (id: string) => {
 
       case "campaign":
         return (
-          <div style={{ background: C.bg2, border: `2px dashed ${C.border2}`, borderRadius: 10, padding: 14, opacity: 0.75 }}>
+          <div style={{ background: C.bg2, border: `1px solid ${C.purple}44`, borderRadius: 10, padding: 14 }}>
             <div style={{ fontSize: 13, fontWeight: 700, color: C.text, marginBottom: 4 }}>Campaign Builder</div>
             <div style={{ fontSize: 11, color: C.text3, lineHeight: 1.6, marginBottom: 10 }}>Send targeted email, card, and SMS sequences to segmented contacts — AI personalizes each message per person.</div>
-            <button disabled style={{ width: "100%", fontSize: 11, padding: "7px", borderRadius: 6, border: `1px solid ${C.border2}`, background: C.bg3, color: C.text4, cursor: "not-allowed", fontFamily: font }}>Coming Soon</button>
+            <button onClick={() => router.push("/campaigns?new=1")}
+              style={{ width: "100%", fontSize: 12, padding: "8px", borderRadius: 6, border: "none", background: C.purple, color: "#fff", cursor: "pointer", fontFamily: font, fontWeight: 600 }}>
+              Build a Campaign →
+            </button>
           </div>
         );
     }
@@ -1558,7 +1551,7 @@ const handleDelete = async (id: string) => {
                   : "Upgrade now to keep unlimited access to all features."}
               </div>
             </div>
-            <button onClick={() => window.location.href = "/pricing"}
+            <button onClick={() => window.location.href = "/plans"}
               style={{ padding: "8px 16px", borderRadius: 8, border: "none", background: planData.trial_expired ? C.red : C.amber, color: "#fff", fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: font, flexShrink: 0, marginLeft: 16 }}>
               Upgrade
             </button>
@@ -1580,9 +1573,9 @@ const handleDelete = async (id: string) => {
                 <div style={{ fontSize: 16, fontWeight: 700, color: C.text }}>Engage</div>
                 <button onClick={() => { const el = document.getElementById("engage-why"); if (el) el.style.display = el.style.display === "none" ? "block" : "none"; }} style={{ fontSize: 10, padding: "2px 8px", borderRadius: 20, border: `1px solid ${C.border2}`, background: "transparent", color: C.text3, cursor: "pointer", fontFamily: font }}>why this matters</button>
               </div>
-              <div style={{ fontSize: 12, color: C.text3, marginBottom: 12 }}>Contacts due for a meaningful touch — sorted by urgency and tier</div>
+              <div style={{ fontSize: 12, color: C.text3, marginBottom: 12 }}>These contacts could use a check-in — sorted by urgency and tier</div>
               <div id="engage-why" style={{ display: "none", marginBottom: 12, background: C.greenLight, borderRadius: 8, padding: "10px 14px", fontSize: 12, color: C.green, lineHeight: 1.6 }}>
-                Humble Hello uses your Dunbar tiers and cadences to surface who needs attention most. Core contacts every 14 days, Inner Circle every 25, Active every 45. Sorted by urgency score — most overdue first.
+                Humble Hello uses AI to surface who needs attention most based on your relationship tiers and how long it's been since you last touched base. Core 5 every 30 days, Inner Circle every 60 days, Active every 120 days. Sorted by urgency — most overdue first.
               </div>
               {loading ? (
                 <div style={{ fontSize: 13, color: C.text3 }}>Loading your relationships...</div>

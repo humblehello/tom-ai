@@ -12,6 +12,12 @@ const Icons = {
       <polyline points="9,22 9,12 15,12 15,22" />
     </svg>
   ),
+  plans: (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M20.59 13.41l-7.17 7.17a2 2 0 01-2.83 0L2 12V2h10l8.59 8.59a2 2 0 010 2.82z" />
+      <line x1="7" y1="7" x2="7.01" y2="7" />
+    </svg>
+  ),
   contacts: (
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
       <path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2" />
@@ -80,7 +86,7 @@ const NAV_ITEMS = [
   { id: "contacts",  path: "/contacts",   icon: Icons.contacts,  label: "Contacts" },
   { id: "audience",  path: "/audience",   icon: Icons.audience,  label: "Audience" },
   { id: "campaigns", path: "/campaigns",  icon: Icons.campaigns, label: "Campaigns" },
-  { id: "pricing",   path: "/pricing",    icon: Icons.campaigns, label: "Pricing" }
+  { id: "plans",     path: "/plans",      icon: Icons.plans, label: "Plans" }
 ];
 
 const JOURNAL_ITEM = {
@@ -197,10 +203,9 @@ export default function Sidebar({ activeId, onNavClick }: SidebarProps) {
   }, []);
 
   const handleSignOut = async () => {
-    await fetch("/api/auth/signout", { method: "POST" });
-    window.location.href = "/connect";
-  };
-
+  await fetch("/api/auth/signout", { method: "POST" });
+  window.location.href = "/";
+};
   const handleNav = (item: typeof NAV_ITEMS[0]) => {
     if (onNavClick) onNavClick(item.id);
     setMobileOpen(false);
@@ -420,7 +425,7 @@ export default function Sidebar({ activeId, onNavClick }: SidebarProps) {
 
             {planInfo && (
               <button
-                onClick={() => { setMobileOpen(false); router.push("/pricing"); }}
+                onClick={() => { setMobileOpen(false); router.push("/plans"); }}
                 style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "8px 14px", borderRadius: 8, border: `1px solid ${planColor}33`, background: `${planColor}18`, cursor: "pointer", fontFamily: font, marginBottom: 4 }}>
                 <span style={{ fontSize: 12, fontWeight: 700, color: planColor }}>{planLabel}</span>
                 {(planInfo.plan === "free" || planInfo.plan === "trial") && (
@@ -641,7 +646,7 @@ export default function Sidebar({ activeId, onNavClick }: SidebarProps) {
 
           {!collapsed && planInfo && (
             <button
-              onClick={() => router.push("/pricing")}
+              onClick={() => router.push("/plans")}
               style={{ width: "100%", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "6px 12px", borderRadius: 8, border: `1px solid ${planColor}33`, background: `${planColor}18`, cursor: "pointer", fontFamily: font, marginBottom: 4 }}>
               <span style={{ fontSize: 11, fontWeight: 700, color: planColor }}>{planLabel}</span>
               {(planInfo.plan === "free" || planInfo.plan === "trial") && (

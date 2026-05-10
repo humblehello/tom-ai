@@ -116,9 +116,9 @@ function Field({ label, value }: { label: string; value?: string | null }) {
   );
 }
 
-function ContactCard({ contact, name, selected, onSelect, onEdit, label }: {
+function ContactCard({ contact, name, selected, onSelect, onEdit, onDelete, label }: {
   contact: Contact | undefined; name: string; selected: boolean;
-  onSelect: () => void; onEdit: () => void; label: string;
+  onSelect: () => void; onEdit: () => void; onDelete: () => void; label: string;
 }) {
   const addr = contact?.home_address;
   const addrStr = addr ? [addr.streetAddress, addr.city, addr.region].filter(Boolean).join(", ") : null;
@@ -126,15 +126,21 @@ function ContactCard({ contact, name, selected, onSelect, onEdit, label }: {
   return (
     <div style={{ flex: 1, border: `2px solid ${selected ? C.green : C.border2}`, borderRadius: 12, padding: 20, background: selected ? C.greenLight : C.bg2, transition: "all 0.15s", display: "flex", flexDirection: "column", gap: 0 }}>
       {/* Label row */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
-        <div style={{ fontSize: 10, fontWeight: 700, color: selected ? C.green : C.text4, textTransform: "uppercase", letterSpacing: "0.1em" }}>
-          {selected ? "✓ Keep this one" : label}
-        </div>
-        <button onClick={e => { e.stopPropagation(); onEdit(); }}
-          style={{ fontSize: 11, padding: "4px 10px", borderRadius: 6, border: `1px solid ${C.border2}`, background: C.bg3, color: C.text3, cursor: "pointer", fontFamily: font, fontWeight: 600 }}>
-          ✎ Edit
-        </button>
-      </div>
+<div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+  <div style={{ fontSize: 10, fontWeight: 700, color: selected ? C.green : C.text4, textTransform: "uppercase", letterSpacing: "0.1em" }}>
+    {selected ? "✓ Keep this one" : label}
+  </div>
+  <div style={{ display: "flex", gap: 6 }}>
+    <button onClick={e => { e.stopPropagation(); onEdit(); }}
+      style={{ fontSize: 11, padding: "4px 10px", borderRadius: 6, border: `1px solid ${C.border2}`, background: C.bg3, color: C.text3, cursor: "pointer", fontFamily: font, fontWeight: 600 }}>
+      ✎ Edit
+    </button>
+    <button onClick={e => { e.stopPropagation(); onDelete(); }}
+      style={{ fontSize: 11, padding: "4px 10px", borderRadius: 6, border: `1px solid ${C.red}`, background: C.redLight, color: C.red, cursor: "pointer", fontFamily: font, fontWeight: 600 }}>
+      ✕ Delete
+    </button>
+  </div>
+</div>
 
       {/* Clickable area */}
       <div onClick={onSelect} style={{ cursor: "pointer", flex: 1 }}>
@@ -257,6 +263,49 @@ export default function MergeReviewPage() {
     setActing(false);
   };
 
+  const handleDeleteContact = async (which: "a" | "b") => {
+  if (!item) return;
+  const contactName = which === "a" ? item.contact_a_name : item.contact_b_name;
+  const contactId = which === "a" ? item.contact_a_id : item.contact_b_id;
+  const otherContactId = which === "a" ? item.contact_b_id : item.contact_a_id;
+
+  if (!confirm(`Delete ${contactName}? This permanently removes the contact and resolves this merge entry.`)) return;
+
+  setActing(true);
+  try {
+    // Delete the contact
+    await fetch(`/api/contacts/${contactId}`, { method: "DELETE" });
+
+    // Resolve the merge queue entry — keep the other contact
+    await fetch("/api/contacts/merge-queue", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        queue_id: item.id,
+        action: "merge",
+        keep_id: otherContactId,
+        delete_id: contactId,
+      }),
+    });
+
+    // Update local state to reflect the deletion
+    setQueue(q => q.map((qi, i) => {
+      if (i !== current) return qi;
+      return {
+        ...qi,
+        contact_a: which === "a" ? undefined : qi.contact_a,
+        contact_b: which === "b" ? undefined : qi.contact_b,
+      };
+    }));
+
+    advance();
+  } catch (e) {
+    console.error(e);
+    alert("Couldn't delete contact. Please try again.");
+  }
+  setActing(false);
+};
+
   const advance = () => {
     setSelected(null);
     if (current + 1 >= queue.length) setDone(true);
@@ -330,14 +379,15 @@ export default function MergeReviewPage() {
 
         {/* Cards */}
         <div style={{ display: "flex", gap: isMobile ? 12 : 16, marginBottom: 24, alignItems: "stretch", flexDirection: isMobile ? "column" as const : "row" as const }}>
-          <ContactCard
-            contact={item.contact_a}
-            name={item.contact_a_name}
-            selected={selected === "a"}
-            onSelect={() => setSelected(selected === "a" ? null : "a")}
-            onEdit={() => setEditContact(item.contact_a || null)}
-            label="Contact A"
-          />
+         <ContactCard
+  contact={item.contact_a}
+  name={item.contact_a_name}
+  selected={selected === "a"}
+  onSelect={() => setSelected(selected === "a" ? null : "a")}
+  onEdit={() => setEditContact(item.contact_a || null)}
+  onDelete={() => handleDeleteContact("a")}
+  label="Contact A"
+/>
           {!isMobile && (
             <div style={{ display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, paddingTop: 40 }}>
               <div style={{ fontSize: 18, color: C.text4, fontWeight: 700 }}>vs</div>
@@ -348,14 +398,15 @@ export default function MergeReviewPage() {
               vs
             </div>
           )}
-          <ContactCard
-            contact={item.contact_b}
-            name={item.contact_b_name}
-            selected={selected === "b"}
-            onSelect={() => setSelected(selected === "b" ? null : "b")}
-            onEdit={() => setEditContact(item.contact_b || null)}
-            label="Contact B"
-          />
+       <ContactCard
+  contact={item.contact_b}
+  name={item.contact_b_name}
+  selected={selected === "b"}
+  onSelect={() => setSelected(selected === "b" ? null : "b")}
+  onEdit={() => setEditContact(item.contact_b || null)}
+  onDelete={() => handleDeleteContact("b")}
+  label="Contact B"
+/>
         </div>
 
         {/* Actions */}

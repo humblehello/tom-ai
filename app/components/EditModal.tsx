@@ -291,20 +291,27 @@ export default function EditModal({ contact, onClose, onSave }: {
   );
 
   return (
-    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", zIndex: 1200, display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
-      <div onClick={e => e.stopPropagation()} style={{ background: C.bg2, borderRadius: 16, width: "100%", maxWidth: 560, maxHeight: "92vh", display: "flex", flexDirection: "column", boxShadow: "0 24px 80px rgba(0,0,0,0.2)" }}>
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", zIndex: 1200, display: "flex", alignItems: isMobile ? "stretch" : "center", justifyContent: "center", padding: isMobile ? 0 : 24 }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: C.bg2, borderRadius: isMobile ? 0 : 16, width: "100%", maxWidth: 560, maxHeight: isMobile ? "100dvh" : "92vh", height: isMobile ? "100dvh" : "auto", display: "flex", flexDirection: "column", boxShadow: "0 24px 80px rgba(0,0,0,0.2)" }}>
 
         {/* Header */}
-        <div style={{ padding: "20px 24px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0 }}>
+        <div style={{ padding: isMobile ? "16px 18px" : "20px 24px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0 }}>
           <div>
             <div style={{ fontSize: 16, fontWeight: 700, color: C.text }}>Edit Contact</div>
             <div style={{ fontSize: 12, color: C.text3, marginTop: 2 }}>{contact.full_name}</div>
           </div>
-          <button onClick={onClose} style={{ background: C.bg3, border: "none", borderRadius: 8, padding: "6px 10px", cursor: "pointer", color: C.text3, fontSize: 18, lineHeight: 1 }}>×</button>
+          <button onClick={onClose} style={{
+            background: C.bg3, border: "none", borderRadius: 8,
+            padding: isMobile ? "10px 14px" : "6px 10px",
+            cursor: "pointer", color: C.text3,
+            fontSize: isMobile ? 22 : 18, lineHeight: 1,
+            minWidth: isMobile ? 44 : "auto",
+            minHeight: isMobile ? 44 : "auto",
+          }}>×</button>
         </div>
 
         {/* Tabs */}
-        <div style={{ padding: "12px 24px", borderBottom: `1px solid ${C.border}`, display: "flex", gap: 6, overflowX: "auto", flexShrink: 0 }}>
+        <div style={{ padding: isMobile ? "10px 18px" : "12px 24px", borderBottom: `1px solid ${C.border}`, display: "flex", gap: 6, overflowX: "auto", flexShrink: 0, WebkitOverflowScrolling: "touch" as const }}>
           {sBtn("basic", "Basic Info")}
           {sBtn("relationship", "Relationship")}
           {sBtn("address", "Addresses")}
@@ -313,7 +320,7 @@ export default function EditModal({ contact, onClose, onSave }: {
         </div>
 
         {/* Body */}
-        <div style={{ padding: 24, overflowY: "auto", flex: 1, display: "flex", flexDirection: "column", gap: 16 }}>
+        <div style={{ padding: isMobile ? 18 : 24, overflowY: "auto", flex: 1, display: "flex", flexDirection: "column", gap: 16, WebkitOverflowScrolling: "touch" as const }}>
 
           {activeSection === "basic" && <>
             <div style={{ display: "grid", gridTemplateColumns: gridTwo, gap: 12 }}>
@@ -526,11 +533,37 @@ export default function EditModal({ contact, onClose, onSave }: {
         </div>
 
         {/* Footer */}
-        <div style={{ padding: "16px 24px", borderTop: `1px solid ${C.border}`, display: "flex", gap: 8, justifyContent: "space-between", alignItems: "center", flexShrink: 0 }}>
-          <div style={{ fontSize: 11, color: C.text4 }}>Phone, name, address auto-formatted on save</div>
-          <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={onClose} style={{ padding: "10px 20px", borderRadius: 8, border: `1px solid ${C.border2}`, background: C.bg2, color: C.text2, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: font }}>Cancel</button>
-            <button onClick={handleSave} disabled={saving} style={{ padding: "10px 20px", borderRadius: 8, border: "none", background: C.green, color: "#fff", fontSize: 13, fontWeight: 600, cursor: saving ? "default" : "pointer", fontFamily: font, opacity: saving ? 0.7 : 1 }}>
+        <div style={{
+          padding: isMobile ? "12px 16px calc(12px + env(safe-area-inset-bottom))" : "16px 24px",
+          borderTop: `1px solid ${C.border}`,
+          background: C.bg2,
+          display: "flex",
+          flexDirection: isMobile ? "column" as const : "row" as const,
+          gap: isMobile ? 10 : 8,
+          justifyContent: "space-between",
+          alignItems: isMobile ? "stretch" : "center",
+          flexShrink: 0,
+        }}>
+          {!isMobile && (
+            <div style={{ fontSize: 11, color: C.text4 }}>Phone, name, address auto-formatted on save</div>
+          )}
+          <div style={{ display: "flex", gap: 8, width: isMobile ? "100%" : "auto" }}>
+            <button onClick={onClose} style={{
+              padding: isMobile ? "12px 20px" : "10px 20px",
+              borderRadius: 8, border: `1px solid ${C.border2}`, background: C.bg2, color: C.text2,
+              fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: font,
+              flex: isMobile ? 1 : "none",
+            }}>
+              Cancel
+            </button>
+            <button onClick={handleSave} disabled={saving} style={{
+              padding: isMobile ? "12px 20px" : "10px 20px",
+              borderRadius: 8, border: "none", background: C.green, color: "#fff",
+              fontSize: 14, fontWeight: 600,
+              cursor: saving ? "default" : "pointer", fontFamily: font,
+              opacity: saving ? 0.7 : 1,
+              flex: isMobile ? 2 : "none",
+            }}>
               {saving ? "Saving..." : "Save Changes"}
             </button>
           </div>

@@ -244,13 +244,14 @@ export const contactsScore = inngest.createFunction(
     await step.run("score", async () => { await scoreAllContacts(userId); return { ok: true }; });
     await step.run("clean", async () => { await supabase.rpc("auto_clean_contacts", { p_user_id: userId }); return { ok: true }; });
     await step.run("merge", async () => { await supabase.rpc("merge_duplicate_contacts", { p_user_id: userId }); return { ok: true }; });
-    await step.run("auto-merge", async () => {
-      const res = await fetch(`${APP_URL}/api/contacts/auto-merge`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "Cookie": `tom_session=${userId}` },
-      });
-      return res.json();
-    });
+    // DISABLED 2026-05-10 per Tom: auto-merge is causing problems, review queue only
+// await step.run("auto-merge", async () => {
+//   const res = await fetch(`${APP_URL}/api/contacts/auto-merge`, {
+//     method: "POST",
+//     headers: { "Content-Type": "application/json", "Cookie": `tom_session=${userId}` },
+//   });
+//   return res.json();
+// });
     return { userId, status: "done" };
   }
 );
@@ -2291,6 +2292,103 @@ export const microsoftMailScan = inngest.createFunction(
     return { users: userIds.length, messages: totalScanned };
   }
 );
+// ── MICROSOFT CONTACTS BACKFILL ──────────────────────────────────────────────
+// Pushes all unsynced contacts from tom_contacts up to Outlook via Graph API.
+// Mirrors the googleBackfill pattern. 2-hour timeout so we can handle thousands.
+export const microsoftBackfill = inngest.createFunction(
+  {
+    id: "microsoft-backfill",
+    name: "Microsoft Contacts Backfill",
+    timeouts: { finish: "2h" },
+    triggers: [{ event: "tom/microsoft.backfill" }],
+  },
+  async ({ event, step }: any) => {
+    const userId = event.data.userId as string;
+
+    // Get ALL contacts missing microsoft_contact_id, in chunks of 1000 to bypass Supabase default limit
+    const contacts = await step.run("get-all-missing-contacts", async () => {
+      const allContacts: any[] = [];
+      let offset = 0;
+      const CHUNK = 1000;
+
+      while (true) {
+        const { data } = await supabase
+          .from("tom_contacts")
+          .select("id, full_name, first_name, last_name, email, all_emails, phone, company, job_title, birthday, notes")
+          .eq("user_id", userId)
+          .is("microsoft_contact_id", null)
+          .not("full_name", "is", "null")
+          .range(offset, offset + CHUNK - 1);
+
+        if (!data || data.length === 0) break;
+        allContacts.push(...data);
+        if (data.length < CHUNK) break;
+        offset += CHUNK;
+      }
+
+      return allContacts;
+    });
+
+    if (contacts.length === 0) {
+      return { userId, pushed: 0, message: "All contacts already synced to Outlook" };
+    }
+
+    let pushed = 0;
+    let failed = 0;
+    const CHUNK = 50; // Per-step chunk so step.run gives us checkpointing
+
+    for (let i = 0; i < contacts.length; i += CHUNK) {
+      const chunk = contacts.slice(i, i + CHUNK);
+      await step.run(`push-chunk-${i}`, async () => {
+        const { createMicrosoftContact } = await import("./microsoft/contacts");
+
+        for (const contact of chunk) {
+          if (!contact.full_name?.trim()) continue;
+
+          try {
+            const result = await createMicrosoftContact(userId, {
+              givenName: contact.first_name || contact.full_name?.split(" ")[0],
+              surname: contact.last_name || contact.full_name?.split(" ").slice(1).join(" "),
+              displayName: contact.full_name,
+              emails: contact.all_emails?.length ? contact.all_emails : contact.email ? [contact.email] : [],
+              mobilePhone: contact.phone || undefined,
+              companyName: contact.company || undefined,
+              jobTitle: contact.job_title || undefined,
+              birthday: contact.birthday || undefined,
+              personalNotes: contact.notes || undefined,
+            });
+
+            if (result?.id) {
+              await supabase
+                .from("tom_contacts")
+                .update({
+                  microsoft_contact_id: result.id,
+                  microsoft_etag: result["@odata.etag"] || null,
+                  microsoft_last_synced_at: new Date().toISOString(),
+                })
+                .eq("id", contact.id)
+                .eq("user_id", userId);
+
+              pushed++;
+            } else {
+              failed++;
+            }
+          } catch (e) {
+            console.error(`[microsoft-backfill] failed for contact ${contact.id}:`, e);
+            failed++;
+          }
+
+          // 500ms delay between contacts to respect Graph rate limits
+          await new Promise(r => setTimeout(r, 500));
+        }
+
+        return { chunk_done: chunk.length };
+      });
+    }
+
+    return { userId, pushed, failed, total: contacts.length };
+  }
+);
 
 // ── MICROSOFT CONTACTS SYNC ──────────────────────────────────────────────────
 export const microsoftContactsSync = inngest.createFunction(
@@ -2303,10 +2401,11 @@ export const microsoftContactsSync = inngest.createFunction(
     ],
   },
   async ({ event, step }: any) => {
-    const { syncMicrosoftContacts, flattenGraphContact } = await import(
+    const { syncMicrosoftContactsPage, flattenGraphContact } = await import(
       "./microsoft/contacts"
     );
 
+    // Resolve users to sync — single user if specified, else all users with Microsoft connected
     const userIds = await step.run("resolve-users", async () => {
       if (event.data?.userId) return [event.data.userId as string];
       const { data } = await supabase
@@ -2316,33 +2415,42 @@ export const microsoftContactsSync = inngest.createFunction(
       return (data ?? []).map((u: any) => u.id);
     });
 
-    const results: Array<{ userId: string; upserted: number; deleted: number }> = [];
+    const results: Array<{ userId: string; upserted: number; deleted: number; status: string }> = [];
 
     for (const userId of userIds) {
-      const result = await step.run(`sync-${userId}`, async () => {
-        const { data: user } = await supabase
-          .from("tom_users")
-          .select("microsoft_contacts_delta_link")
-          .eq("id", userId)
-          .single();
+      const result = await step.run(`sync-page-${userId}`, async () => {
+        // Get cursor from event data (pagination continuation) or fall back to user's delta link
+        let cursor: string | null = event.data?.cursor ?? null;
 
-        const { upserted, deleted, newDeltaLink } = await syncMicrosoftContacts(
+        if (!cursor) {
+          // No cursor in event — start from saved delta link
+          const { data: user } = await supabase
+            .from("tom_users")
+            .select("microsoft_contacts_delta_link")
+            .eq("id", userId)
+            .single();
+          cursor = user?.microsoft_contacts_delta_link ?? null;
+        }
+
+        // Fetch ONE page only — no while loop
+        const { upserted, deleted, nextLink, newDeltaLink } = await syncMicrosoftContactsPage(
           userId,
-          user?.microsoft_contacts_delta_link ?? null
+          cursor
         );
 
+        // Upsert this page's contacts to pending table
         if (upserted.length > 0) {
           const rows = upserted.map((c: any) => ({
             user_id: userId,
             ...flattenGraphContact(c),
-            microsoft_last_synced_at: new Date().toISOString(),
           }));
 
           await supabase
-            .from("tom_contacts")
+            .from("microsoft_pending_contacts")
             .upsert(rows, { onConflict: "user_id,microsoft_contact_id" });
         }
 
+        // Apply deletions
         if (deleted.length > 0) {
           await supabase
             .from("tom_contacts")
@@ -2351,6 +2459,7 @@ export const microsoftContactsSync = inngest.createFunction(
             .in("microsoft_contact_id", deleted);
         }
 
+        // Save the new delta link if sync is complete (no more pages)
         if (newDeltaLink) {
           await supabase
             .from("tom_users")
@@ -2365,10 +2474,29 @@ export const microsoftContactsSync = inngest.createFunction(
           userId,
           upserted: upserted.length,
           deleted: deleted.length,
+          status: nextLink ? "page_done_more_remaining" : "sync_complete",
+          nextLink,
         };
       });
 
-      results.push(result);
+      results.push({
+        userId: result.userId,
+        upserted: result.upserted,
+        deleted: result.deleted,
+        status: result.status,
+      });
+
+      // If more pages remain for this user, fire the next page immediately as a separate event
+      // This keeps each run under ~30 seconds and respects the 300s ceiling
+      if ((result as any).nextLink) {
+        await step.run(`continue-${userId}`, async () => {
+          await inngest.send({
+            name: "tom/microsoft.contacts.sync",
+            data: { userId, cursor: (result as any).nextLink },
+          });
+          return { continued: userId };
+        });
+      }
     }
 
     return { results };
@@ -2447,5 +2575,50 @@ export const microsoftCalendarScan = inngest.createFunction(
     }
 
     return { users: userIds.length, events: totalEvents };
+  }
+);
+// ── VERIFICATION SENDER ───────────────────────────────────────────────────────
+export const verificationsSend = inngest.createFunction(
+  { id: "verifications-send", name: "Verification Sender", triggers: [{ event: "tom/verifications.send" }] },
+  async ({ event, step }: any) => {
+    const userId = event.data.userId as string;
+
+    const nowET = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
+    const hourET = nowET.getHours();
+    if (hourET < 9 || hourET >= 16) {
+      return { skipped: `outside send window (ET hour: ${hourET})`, userId };
+    }
+
+    const HOURLY_BATCH_SIZE = 3;
+
+    const result = await step.run("send-batch", async () => {
+      const res = await fetch(`${APP_URL}/api/contacts/verify`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Cookie": `tom_session=${userId}` },
+        body: JSON.stringify({ batch_size: HOURLY_BATCH_SIZE }),
+      });
+      return res.json();
+    });
+
+    return { userId, hourET, ...result };
+  }
+);
+
+// ── VERIFICATION REPLY PARSER ─────────────────────────────────────────────────
+export const verificationsParse = inngest.createFunction(
+  { id: "verifications-parse", name: "Verification Reply Parser", triggers: [{ event: "tom/verifications.parse" }] },
+  async ({ event, step }: any) => {
+    const userId = event.data.userId as string;
+
+    const result = await step.run("parse-replies", async () => {
+      const res = await fetch(`${APP_URL}/api/contacts/verify/parse`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Cookie": `tom_session=${userId}` },
+        body: JSON.stringify({ userId }),
+      });
+      return res.json();
+    });
+
+    return { userId, ...result };
   }
 );

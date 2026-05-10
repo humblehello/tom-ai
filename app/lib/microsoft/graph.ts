@@ -51,10 +51,13 @@ export async function graphFetch<T = unknown>(
     throw new GraphError(res.status, res.statusText, errText, url);
   }
 
-  // 204 No Content (common on DELETE / PATCH)
-  if (res.status === 204) return undefined as T;
+  // 202 Accepted (sendMail), 204 No Content (DELETE / PATCH), or any
+  // successful response with empty body — return undefined instead of parsing.
+  if (res.status === 204 || res.status === 202) return undefined as T;
 
-  return (await res.json()) as T;
+  const text = await res.text();
+  if (!text) return undefined as T;
+  return JSON.parse(text) as T;
 }
 
 /**

@@ -356,7 +356,7 @@ export default function FeatureGate({
               Maybe later
             </button>
             <button
-              onClick={() => router.push("/pricing")}
+              onClick={() => router.push("/plans")}
               style={{
                 flex: 1,
                 padding: "11px",

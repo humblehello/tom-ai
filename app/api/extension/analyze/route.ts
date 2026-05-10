@@ -206,15 +206,17 @@ async function findContact(
 // ─────────────────────────────────────────────────────────────────────
 
 function mapBigFiveToArchetype(bigFive: any): { name: string; descriptors: string[]; quadrant: { x: number; y: number } } {
-  const c = bigFive.conscientiousness?.score || 50;
-  const e = bigFive.extraversion?.score || 50;
-  const o = bigFive.openness?.score || 50;
-  const a = bigFive.agreeableness?.score || 50;
+  // Use ?? not || — score of 0 is valid data, not missing data
+  const c = bigFive.conscientiousness?.score ?? 50;
+  const e = bigFive.extraversion?.score ?? 50;
+  const o = bigFive.openness?.score ?? 50;
+  const a = bigFive.agreeableness?.score ?? 50;
 
+  // Midpoint > 50 = true quadrant logic. Above 50 leans toward the trait.
   let name: string;
-  if (c >= 60 && e >= 60) name = "Driver";
-  else if (c >= 60 && e < 60) name = "Analyst";
-  else if (c < 60 && e >= 60) name = "Connector";
+  if (c > 50 && e > 50) name = "Driver";
+  else if (c > 50 && e <= 50) name = "Analyst";
+  else if (c <= 50 && e > 50) name = "Connector";
   else name = "Observer";
 
   const descriptors: string[] = [];
@@ -223,11 +225,12 @@ function mapBigFiveToArchetype(bigFive: any): { name: string; descriptors: strin
   if (name === "Connector") descriptors.push("Energetic");
   if (name === "Observer") descriptors.push("Reserved");
 
-  if (o >= 70) descriptors.push("Curious");
-  else if (o <= 40) descriptors.push("Practical");
+  // Wider mid-range so descriptors only fire on clearer signals
+  if (o >= 65) descriptors.push("Curious");
+  else if (o <= 35) descriptors.push("Practical");
 
-  if (a >= 70) descriptors.push("Warm");
-  else if (a <= 40) descriptors.push("Direct");
+  if (a >= 65) descriptors.push("Warm");
+  else if (a <= 35) descriptors.push("Direct");
 
   return {
     name,

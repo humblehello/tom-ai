@@ -101,11 +101,13 @@ export default function SettingsPage() {
   const [approvalThreshold, setApprovalThreshold] = useState(50);
   const [giftStyle, setGiftStyle] = useState("thoughtful");
   const [snoozeDays, setSnoozeDays] = useState(14);
-  const [cardSignoff, setCardSignoff] = useState("");
-  const [cardTone, setCardTone] = useState("warm");
-  const [cardThresholds, setCardThresholds] = useState<number[]>([2]);
-  const [cardAutoSend, setCardAutoSend] = useState(false);
-  const [cardTriggers, setCardTriggers] = useState<string[]>(["birthday"]);
+ const [cardSignoff, setCardSignoff] = useState("");
+const [cardTone, setCardTone] = useState("warm");
+const [cardThresholds, setCardThresholds] = useState<number[]>([2]);
+const [cardAutoSend, setCardAutoSend] = useState(false);
+const [cardTriggers, setCardTriggers] = useState<string[]>(["birthday"]);
+const [cardBudgetCents, setCardBudgetCents] = useState(2500);     // $25 default
+const [giftBudgetCents, setGiftBudgetCents] = useState(5000);     // $50 default
   const [suppressNoEmail, setSuppressNoEmail] = useState(true);
   const [networkOptIn, setNetworkOptIn] = useState(false);
   const [cardPurchaseThreshold, setCardPurchaseThreshold] = useState(500);
@@ -152,14 +154,16 @@ export default function SettingsPage() {
         setMicrosoftEmail(me.microsoft_account_email ?? null);
         setPrimaryProvider(me.primary_email_provider || "google");
       }
-      if (me?.card_profile) {
-        const cp = me.card_profile;
-        setCardSignoff(cp.signoff || "");
-        setCardTone(cp.tone || "warm");
-        setCardThresholds(cp.auto_send_thresholds || [cp.auto_send_threshold] || [2]);
-        setCardAutoSend(cp.auto_send_enabled || false);
-        setCardTriggers(cp.triggers || ["birthday"]);
-      }
+     if (me?.card_profile) {
+  const cp = me.card_profile;
+  setCardSignoff(cp.signoff || "");
+  setCardTone(cp.tone || "warm");
+  setCardThresholds(cp.auto_send_thresholds || [cp.auto_send_threshold] || [2]);
+  setCardAutoSend(cp.auto_send_enabled || false);
+  setCardTriggers(cp.triggers || ["birthday"]);
+  setCardBudgetCents(cp.budget_cents ?? 2500);
+  setGiftBudgetCents(cp.gift_budget_cents ?? 5000);
+}
       setLoading(false);
     });
   }, []);
@@ -177,43 +181,52 @@ export default function SettingsPage() {
   }, []);
 
   const handleSave = async () => {
-    setSaving(true);
-    try {
-      await fetch("/api/settings", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          notify_email: notifyEmail,
-          notify_push: notifyPush,
-          auto_order_threshold: autoOrderThreshold,
-          approval_threshold: approvalThreshold,
-          gift_style: giftStyle,
-          snooze_days: snoozeDays,
-          network_opt_in: networkOptIn,
-          card_purchase_threshold: cardPurchaseThreshold,
-          gift_purchase_threshold: giftPurchaseThreshold,
-          purchase_card_auto_send: purchaseCardAutoSend,
-          purchase_gift_auto_send: purchaseGiftAutoSend,
-        }),
-      });
-      await fetch("/api/profile", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          card_profile: {
-            signoff: cardSignoff,
-            tone: cardTone,
-            auto_send_thresholds: cardThresholds,
-            auto_send_enabled: cardAutoSend,
-            triggers: cardTriggers,
-          },
-        }),
-      });
-      setSaved(true);
-      setTimeout(() => setSaved(false), 3000);
-    } catch {}
-    setSaving(false);
-  };
+  setSaving(true);
+  try {
+    // Fetch current card_profile to preserve locked defaults
+    // (gift_budget_cents, gift_style, purchase_thank_you_threshold_cents, etc.)
+    const meRes = await fetch("/api/auth/me");
+    const me = meRes.ok ? await meRes.json() : null;
+    const currentCardProfile = me?.card_profile || {};
+
+    await fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        notify_email: notifyEmail,
+        notify_push: notifyPush,
+        auto_order_threshold: autoOrderThreshold,
+        approval_threshold: approvalThreshold,
+        gift_style: giftStyle,
+        snooze_days: snoozeDays,
+        network_opt_in: networkOptIn,
+        card_purchase_threshold: cardPurchaseThreshold,
+        gift_purchase_threshold: giftPurchaseThreshold,
+        purchase_card_auto_send: purchaseCardAutoSend,
+        purchase_gift_auto_send: purchaseGiftAutoSend,
+      }),
+    });
+    await fetch("/api/profile", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    card_profile: {
+      ...currentCardProfile,
+      signoff: cardSignoff,
+      tone: cardTone,
+      auto_send_thresholds: cardThresholds,
+      auto_send_enabled: cardAutoSend,
+      triggers: cardTriggers,
+      budget_cents: cardBudgetCents,
+      gift_budget_cents: giftBudgetCents,
+    },
+  }),
+});
+    setSaved(true);
+    setTimeout(() => setSaved(false), 3000);
+  } catch {}
+  setSaving(false);
+};
 
   const handlePortal = async () => {
     setPortalLoading(true);
@@ -260,6 +273,11 @@ export default function SettingsPage() {
   const contactLimit = planData?.plan_contact_limit || 1000;
   const planLabel = plan === "trial" ? "Hello Growth (Trial)" : plan === "pro" ? "Hello Pro" : plan === "growth" ? "Hello Growth" : "Free";
   const planColor = plan === "growth" ? C.purple : plan === "pro" ? C.green : plan === "trial" ? C.terra : C.text3;
+  const planFeatures = (() => {
+  if (plan === "growth" || plan === "trial") return "Unlimited drafts · 200 RI/mo · Campaigns + cards & gifts";
+  if (plan === "pro") return "Unlimited drafts · 50 RI/mo · Cards & gifts";
+  return "25 drafts/wk · 5 RI/mo · Unlimited contacts";
+})();
 
   const GIFT_STYLES = [
     { value: "thoughtful", label: "Thoughtful", desc: "Personal, meaningful gifts tailored to the recipient" },
@@ -335,7 +353,7 @@ export default function SettingsPage() {
 
           <div style={{ display: "flex", flexDirection: "column" as const, gap: 20 }}>
 
-            <Card title="Plan & Billing" subtitle="Manage your Humble Hello subscription">
+           <Card title="Plan & Billing" subtitle="Manage your Humble Hello subscription">
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
                 <div>
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -344,11 +362,11 @@ export default function SettingsPage() {
                       {plan === "trial" ? `${trialDaysLeft} days left` : plan === "free" ? "Free" : "Active"}
                     </span>
                   </div>
-                  <div style={{ fontSize: 12, color: C.text3, marginTop: 2 }}>Up to {contactLimit.toLocaleString()} contacts</div>
+                  <div style={{ fontSize: 12, color: C.text3, marginTop: 2 }}>{planFeatures}</div>
                 </div>
                 <div style={{ display: "flex", gap: 8 }}>
                   {(plan === "free" || plan === "trial") && (
-                    <button onClick={() => router.push("/pricing")} style={{ padding: "8px 18px", borderRadius: 8, border: "none", background: C.terra, color: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: font }}>
+                    <button onClick={() => router.push("/plans")} style={{ padding: "8px 18px", borderRadius: 8, border: "none", background: C.terra, color: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: font }}>
                       Upgrade
                     </button>
                   )}
@@ -371,7 +389,7 @@ export default function SettingsPage() {
                   </div>
                   {draftsPercent > 80 && (
                     <div style={{ fontSize: 11, color: C.red, marginTop: 4 }}>
-                      Running low — <button onClick={() => router.push("/pricing")} style={{ background: "none", border: "none", color: C.red, fontWeight: 700, cursor: "pointer", fontSize: 11, padding: 0, textDecoration: "underline" }}>upgrade for more</button>
+                      Running low — <button onClick={() => router.push("/plans")} style={{ background: "none", border: "none", color: C.red, fontWeight: 700, cursor: "pointer", fontSize: 11, padding: 0, textDecoration: "underline" }}>upgrade for more</button>
                     </div>
                   )}
                 </div>
@@ -435,7 +453,7 @@ export default function SettingsPage() {
               </div>
 
               <div style={{ fontSize: 12, color: C.text4, paddingTop: 8, borderTop: `1px solid ${C.border}` }}>
-                Need more? <button onClick={() => router.push("/pricing")} style={{ background: "none", border: "none", color: C.terra, fontWeight: 600, cursor: "pointer", fontSize: 12, padding: 0 }}>View all plans →</button>
+                Need more? <button onClick={() => router.push("/plans")} style={{ background: "none", border: "none", color: C.terra, fontWeight: 600, cursor: "pointer", fontSize: 12, padding: 0 }}>View all plans →</button>
               </div>
             </Card>
 
@@ -520,6 +538,50 @@ export default function SettingsPage() {
                   })}
                 </div>
               </div>
+              {/* Card budget */}
+<div style={{ borderTop: `1px solid ${C.border}`, paddingTop: 16 }}>
+  <label style={lStyle}>Monthly card budget</label>
+  <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+    <input
+      type="range"
+      min={10}
+      max={200}
+      step={5}
+      value={Math.round(cardBudgetCents / 100)}
+      onChange={e => setCardBudgetCents(+e.target.value * 100)}
+      style={{ flex: 1, accentColor: C.terra }}
+    />
+    <span style={{ fontSize: 14, fontWeight: 700, color: C.text, minWidth: 60 }}>
+      ${Math.round(cardBudgetCents / 100)}
+      <span style={{ fontSize: 11, color: C.text4, fontWeight: 400 }}>/mo</span>
+    </span>
+  </div>
+  <div style={{ fontSize: 11, color: C.text4, marginTop: 4 }}>
+    Cap on auto-send card spend per month. ~{Math.floor(cardBudgetCents / 475)} cards at $4.75 each. Resets on the 1st.
+  </div>
+</div>
+
+{/* Gift budget */}
+<div>
+  <label style={lStyle}>Per-gift budget</label>
+  <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+    <input
+      type="range"
+      min={10}
+      max={500}
+      step={5}
+      value={Math.round(giftBudgetCents / 100)}
+      onChange={e => setGiftBudgetCents(+e.target.value * 100)}
+      style={{ flex: 1, accentColor: C.terra }}
+    />
+    <span style={{ fontSize: 14, fontWeight: 700, color: C.text, minWidth: 60 }}>
+      ${Math.round(giftBudgetCents / 100)}
+    </span>
+  </div>
+  <div style={{ fontSize: 11, color: C.text4, marginTop: 4 }}>
+    Maximum spend per gift sent. Anything above this requires your approval.
+  </div>
+</div>
               <div style={{ background: C.terraLight, border: `1px solid ${C.terra}44`, borderRadius: 10, padding: "12px 16px", fontSize: 12, color: C.terraDark, lineHeight: 1.6 }}>
                 Humble Hello sends handwritten cards on your behalf — real pen, real stamp, delivered by mail. "Thinking of you" and "Thank you" cards are always manual via the Reach Out button.
               </div>
@@ -743,6 +805,27 @@ export default function SettingsPage() {
             </Card>
 
             <Card title="Danger Zone" subtitle="Irreversible actions — use with care">
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 0", borderBottom: `1px solid ${C.border}` }}>
+  <div>
+    <div style={{ fontSize: 13, fontWeight: 600, color: C.text }}>Re-do onboarding</div>
+    <div style={{ fontSize: 11, color: C.text3, marginTop: 2 }}>Walk through the welcome flow again — useful for testing or refreshing your setup</div>
+  </div>
+  <button onClick={async () => {
+    if (!confirm("Re-do onboarding? You'll be taken back to the welcome flow. Your contacts and settings stay intact.")) return;
+    try {
+      const res = await fetch("/api/onboarding/reset", { method: "POST" });
+      if (res.ok) {
+        router.push("/onboarding");
+      } else {
+        alert("Couldn't reset onboarding. Try again or refresh the page.");
+      }
+    } catch {
+      alert("Network error. Try again.");
+    }
+  }} style={{ padding: "7px 14px", borderRadius: 8, border: `1px solid ${C.border2}`, background: C.bg2, color: C.text2, fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: font }}>
+    Re-do
+  </button>
+</div>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "10px 0", borderBottom: `1px solid ${C.border}` }}>
                 <div>
                   <div style={{ fontSize: 13, fontWeight: 600, color: C.text }}>Reset Google sync token</div>

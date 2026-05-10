@@ -16,7 +16,7 @@ export async function POST(req: Request) {
   const userId = await getUserId();
   if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
-  const { contact_id, action } = await req.json();
+  const { contact_id, action, days } = await req.json();
   if (!contact_id || !action) {
     return NextResponse.json({ error: "Missing contact_id or action" }, { status: 400 });
   }
@@ -35,6 +35,12 @@ export async function POST(req: Request) {
     case "pause_30":
       // Hard 30-day pause regardless of tier.
       updates.engage_snoozed_until = new Date(now.getTime() + 30 * 86400_000).toISOString();
+      break;
+
+    case "pause":
+      // Custom-duration pause. Days passed in request body. Default 30.
+      const pauseDays = Math.max(1, Math.min(365, Number(days) || 30));
+      updates.engage_snoozed_until = new Date(now.getTime() + pauseDays * 86400_000).toISOString();
       break;
 
     case "snooze_1year":

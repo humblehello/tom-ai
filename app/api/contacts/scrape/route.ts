@@ -2,31 +2,10 @@ import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createClient } from "@supabase/supabase-js";
 import { updateGoogleContact, createGoogleContact } from "../../../lib/googleContacts";
+import { isBlockedEmail } from "@/app/lib/contact-blocklist";
 
-const BLOCKED_LOCAL_PARTS = new Set([
-  "noreply", "no-reply", "donotreply", "do-not-reply",
-  "notifications", "notification", "notify",
-  "mailer", "mailer-daemon", "postmaster", "bounce", "bounces",
-  "support", "help", "helpdesk",
-  "info", "information",
-  "hello", "hi",
-  "team", "teams",
-  "admin", "administrator",
-  "contact", "contacts",
-  "sales", "marketing",
-  "newsletter", "newsletters",
-  "updates", "update",
-  "alerts", "alert",
-  "billing", "invoice", "invoices", "payments", "receipts",
-  "communication", "communications",
-  "ap", "ar", "accounting",
-  "careers", "jobs", "hiring",
-  "unsubscribe", "optout",
-  "automated", "automate", "automatic",
-  "system", "robot", "bot",
-  "feedback-id",
-]);
-
+// Local-part blocklist moved to app/lib/contact-blocklist.ts (substring match, 2026-05-10)
+// Domain blocklist kept inline — these are sending-infrastructure domains, not local-part keywords
 const BLOCKED_DOMAIN_PATTERNS = [
   "mailchimp.com", "sendgrid.net", "constantcontact.com",
   "hubspot.com", "klaviyo.com", "marketo.com", "pardot.com",
@@ -41,17 +20,8 @@ function isBlockedSender(email: string): boolean {
   const local = lower.slice(0, atIndex);
   const domain = lower.slice(atIndex + 1);
 
-  // Block known automated local parts
-  if (BLOCKED_LOCAL_PARTS.has(local)) return true;
-
-  // Block local parts starting with common junk prefixes
-  if (
-    local.startsWith("noreply") ||
-    local.startsWith("no_reply") ||
-    local.startsWith("donotreply") ||
-    local.startsWith("bounce") ||
-    local.startsWith("mailer")
-  ) return true;
+  // Local-part keyword check (substring match via shared helper)
+  if (isBlockedEmail(lower)) return true;
 
   // Block known marketing/transactional domains
   if (BLOCKED_DOMAIN_PATTERNS.some(d => domain.includes(d))) return true;

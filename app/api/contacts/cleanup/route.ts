@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createClient } from "@supabase/supabase-js";
 import { getValidAccessToken } from "@/app/lib/google";
+import { isBlockedEmail } from "@/app/lib/contact-blocklist";
 
 export const maxDuration = 60;
 
@@ -14,24 +15,8 @@ async function getUserId(): Promise<string | null> {
   const cookieStore = await cookies();
   return cookieStore.get("tom_session")?.value || null;
 }
-
-const SYSTEM_EMAIL_PATTERNS = [
-  /^noreply@/i, /^no-reply@/i, /^donotreply@/i, /^do-not-reply@/i,
-  /^notifications?@/i, /^newsletter@/i, /^updates?@/i, /^alerts?@/i,
-  /^support@/i, /^help@/i, /^info@/i, /^hello@/i, /^hi@/i,
-  /^contact@/i, /^contacts@/i, /^team@/i, /^admin@/i, /^administrator@/i,
-  /^sales@/i, /^marketing@/i, /^billing@/i, /^invoices?@/i,
-  /^accounts?@/i, /^orders?@/i, /^shipping@/i, /^delivery@/i,
-  /^feedback@/i, /^survey@/i, /^unsubscribe@/i, /^mailer@/i,
-  /^bounce@/i, /^postmaster@/i, /^webmaster@/i, /^hostmaster@/i,
-  /^abuse@/i, /^spam@/i, /^junk@/i, /^automat/i,
-  /^robot@/i, /^bot@/i, /^service@/i, /^system@/i,
-  /^replies?@/i, /^reply@/i, /^message@/i, /^mail@/i,
-];
-
-function isSystemEmail(email: string): boolean {
-  return SYSTEM_EMAIL_PATTERNS.some(p => p.test(email));
-}
+// Pattern list moved to app/lib/contact-blocklist.ts (2026-05-10)
+const isSystemEmail = (email: string) => isBlockedEmail(email);
 
 function isMissingName(contact: any): boolean {
   const full = (contact.full_name || "").trim();

@@ -2,6 +2,149 @@ import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createClient } from "@supabase/supabase-js";
 
+// ─────────────────────────────────────────────────────────────────────
+// Server-side name resolution
+// ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Extract candidate person names from the user's latest message.
+ * Looks for capitalized words following relationship cues, plus
+ * standalone capitalized name patterns.
+ */
+function extractCandidateNames(text: string): string[] {
+  if (!text) return [];
+
+  const candidates = new Set<string>();
+
+  // Pattern 1: relationship cues followed by capitalized words
+  // "my wife Nicole", "my friend Gabe", "my best friend Marcus Johnson"
+  const cuePattern = /\b(?:my|our|the)\s+(?:wife|husband|partner|spouse|mom|dad|mother|father|son|daughter|brother|sister|friend|best friend|buddy|co-?founder|business partner|mentor|boss|colleague|client|attorney|accountant|neighbor)s?\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)/gi;
+  let match;
+  while ((match = cuePattern.exec(text)) !== null) {
+    candidates.add(match[1].trim());
+  }
+
+  // Pattern 2: explicit name introductions
+  // "I know Sarah", "I met John Davis", "talking to Mike", "saw Gabe yesterday"
+  const introPattern = /\b(?:know|met|saw|with|to|from|about|talking to|spoke with|called|texted|emailed|reached out to)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b/g;
+  while ((match = introPattern.exec(text)) !== null) {
+    candidates.add(match[1].trim());
+  }
+
+  // Pattern 3: standalone proper-noun pairs (likely full names)
+  // "Marcus Johnson is brilliant", "Nicole Rector"
+  const fullNamePattern = /\b([A-Z][a-z]+\s+[A-Z][a-z]+)\b/g;
+  while ((match = fullNamePattern.exec(text)) !== null) {
+    candidates.add(match[1].trim());
+  }
+
+  // Pattern 4: standalone single names (only if message is short/conversational)
+  // "Gabe is great" — but skip if the word is sentence-initial or a common word
+  if (text.length < 200) {
+    const singleNamePattern = /(?<=\s|^)([A-Z][a-z]{2,})(?=\s|[.,!?]|$)/g;
+    const commonWords = new Set([
+      "I", "We", "They", "He", "She", "It", "That", "This", "Yes", "No",
+      "Okay", "OK", "Sure", "Maybe", "Today", "Yesterday", "Tomorrow",
+      "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
+      "January", "February", "March", "April", "May", "June",
+      "July", "August", "September", "October", "November", "December",
+      "Christmas", "Easter", "Thanksgiving",
+    ]);
+    while ((match = singleNamePattern.exec(text)) !== null) {
+      if (!commonWords.has(match[1])) {
+        candidates.add(match[1].trim());
+      }
+    }
+  }
+
+  return Array.from(candidates);
+}
+
+/**
+ * Look up candidate names against the user's contacts.
+ * Returns matches with context, plus a list of names that didn't match anything.
+ */
+async function resolveContactNames(
+  userId: string,
+  candidateNames: string[]
+): Promise<{
+  matched: Array<{
+    candidate: string;
+    contact: any;
+    confidence: "exact" | "first_name" | "fuzzy";
+  }>;
+  unmatched: string[];
+}> {
+  if (candidateNames.length === 0) {
+    return { matched: [], unmatched: [] };
+  }
+
+  const matched: Array<{ candidate: string; contact: any; confidence: "exact" | "first_name" | "fuzzy" }> = [];
+  const unmatched: string[] = [];
+
+  for (const candidate of candidateNames) {
+    const candidateTrim = candidate.trim();
+    if (!candidateTrim) continue;
+
+    // Try exact match first (full name)
+    const { data: exactHits } = await supabase
+      .from("tom_contacts")
+      .select("id, full_name, relationship_type, relationship_tag, dunbar_tier, key_context, intelligence, tags, company, job_title")
+      .eq("user_id", userId)
+      .ilike("full_name", candidateTrim)
+      .limit(3);
+
+    if (exactHits && exactHits.length === 1) {
+      matched.push({ candidate, contact: exactHits[0], confidence: "exact" });
+      continue;
+    }
+    if (exactHits && exactHits.length > 1) {
+      // Multiple exact matches — let the AI ask for clarification
+      matched.push({ candidate, contact: exactHits[0], confidence: "fuzzy" });
+      continue;
+    }
+
+    // No exact — try first-name match (where contact's first word matches the candidate)
+    // e.g. user says "Gabe" → match "Gabe Peters", "Gabriel Sanchez"
+    const { data: firstNameHits } = await supabase
+      .from("tom_contacts")
+      .select("id, full_name, relationship_type, relationship_tag, dunbar_tier, key_context, intelligence, tags, company, job_title, email_count")
+      .eq("user_id", userId)
+      .ilike("full_name", `${candidateTrim}%`)
+      .order("email_count", { ascending: false, nullsFirst: false })
+      .limit(5);
+
+    if (firstNameHits && firstNameHits.length > 0) {
+      // Prefer the contact with the most email_count (likely the one they actually mean)
+      matched.push({
+        candidate,
+        contact: firstNameHits[0],
+        confidence: firstNameHits.length === 1 ? "first_name" : "fuzzy",
+      });
+      continue;
+    }
+
+    // Try fuzzy substring match (less common but catches "Mike" → "Michael Smith")
+    const { data: fuzzyHits } = await supabase
+      .from("tom_contacts")
+      .select("id, full_name, relationship_type, relationship_tag, dunbar_tier, key_context, intelligence, tags, company, job_title, email_count")
+      .eq("user_id", userId)
+      .ilike("full_name", `%${candidateTrim}%`)
+      .order("email_count", { ascending: false, nullsFirst: false })
+      .limit(3);
+
+    if (fuzzyHits && fuzzyHits.length > 0) {
+      matched.push({ candidate, contact: fuzzyHits[0], confidence: "fuzzy" });
+      continue;
+    }
+
+    // No match anywhere
+    unmatched.push(candidate);
+  }
+
+  return { matched, unmatched };
+}
+
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
   process.env.SUPABASE_SERVICE_ROLE_KEY!
@@ -173,15 +316,33 @@ Return ONLY the question text, nothing else.`,
     // ── Action: chat ─────────────────────────────────────────────────────────
     if (action === "chat") {
       const gapContact = messages?.[0]?.gap_contact || "";
-      // Load user's contacts for name resolution
-      const { data: userContacts } = await supabase
-        .from("tom_contacts")
-        .select("id, full_name, relationship_type, dunbar_tier")
-        .eq("user_id", userId)
-        .order("email_count", { ascending: false })
-        .limit(200);
 
-      const contactList = (userContacts || []).map(c => c.full_name).join(", ");
+      // ── Resolve names server-side ────────────────────────────────────────
+      // Extract names from the latest user message, look them up in DB,
+      // inject only the matched contacts (with rich context) into the prompt.
+      const latestUserMessage = [...(messages || [])].reverse().find((m: any) => m.role === "user")?.content || "";
+      const candidateNames = extractCandidateNames(latestUserMessage);
+      const { matched, unmatched } = await resolveContactNames(userId, candidateNames);
+
+      // Build contact context block for the prompt
+      let contactContextBlock = "";
+      if (matched.length > 0 || unmatched.length > 0) {
+        const matchedLines = matched.map(m => {
+          const c = m.contact;
+          const tier = c.dunbar_tier ? `tier ${c.dunbar_tier}` : "no tier";
+          const tag = c.relationship_tag || c.relationship_type || "no relationship type";
+          const role = c.job_title && c.company ? ` — ${c.job_title} at ${c.company}` : c.company ? ` — at ${c.company}` : "";
+          const ctx = c.key_context ? ` Key context: ${c.key_context}` : "";
+          const conf = m.confidence === "exact" ? "" : m.confidence === "first_name" ? " [matched on first name only]" : " [fuzzy match — confirm with user]";
+          return `  • "${m.candidate}" → ${c.full_name} (${tier}, ${tag})${role}.${ctx}${conf}`;
+        }).join("\n");
+
+        const unmatchedLines = unmatched.length > 0
+          ? `\nNOT IN CONTACTS (mentioned but no match):\n${unmatched.map(n => `  • ${n}`).join("\n")}`
+          : "";
+
+        contactContextBlock = `\nNAME RESOLUTION (server-verified, authoritative):\n${matchedLines}${unmatchedLines}\n`;
+      }
 
       const systemPrompt = `You are ${userName}'s personal relationship coach inside Humble Hello — a relationship OS that automatically updates contacts based on conversations.
 
@@ -191,13 +352,14 @@ User context:
 - Name: ${userName}
 - Location: ${userCity}  
 - Company: ${userCompany}
-- Known contacts: ${contactList.slice(0, 500)}
+${contactContextBlock}
 
 CONTACT RESOLUTION RULES — this is critical:
-- When ${userName} mentions someone by first name only (e.g. "my friend Gabe"), check the known contacts list and confirm: "Gabe Peters?" before proceeding
-- When ${userName} mentions someone with a relationship prefix like "my wife Nicole" or "my best friend Marcus" — update that contact's relationship type automatically and confirm: "Got it — I'll update Nicole as your wife."
-- If you can't find the contact in the list, say: "I don't see [Name] in your contacts yet — want me to add them?"
-- Never assume who someone is — always confirm ambiguous first names
+- The NAME RESOLUTION block above is AUTHORITATIVE. It was generated server-side from ${userName}'s actual contact database.
+- If a name appears in the matched list, that contact EXISTS — confirm naturally without doubt: "Got it, Gabe Peters." or "Yes, your wife Nicole — I'll update that."
+- If a name appears with [fuzzy match], gently confirm: "Did you mean Gabe Peters? I have a few Gabes in your contacts."
+- If a name appears in NOT IN CONTACTS, the person is new: "I don't see [Name] in your contacts yet — want me to add them?"
+- If no NAME RESOLUTION block is present, no specific names were detected in this turn — proceed with the conversation normally.
 - When ${userName} says "my wife/husband/partner [Name]" → relationship_type = family, relationship_tag = Wife/Husband/Partner, dunbar_tier = 1
 - When ${userName} says "my best friend [Name]" → relationship_type = close_friend, relationship_tag = Best Friend, dunbar_tier = 2
 
@@ -523,62 +685,88 @@ If nothing meaningful was found about ${userName} themselves, return {"nothing_f
         });
       } catch (_) {}
 
-      // After extracting, trigger intelligence scan for contacts mentioned
-      // This updates tags, intelligence, and clears gaps that were answered
+      // After extracting, resolve each extracted contact against the DB using
+      // the same server-side resolution logic as the chat handler. Contacts
+      // that match get updated; contacts that don't match are flagged as new.
+      const newContactsToCreate: any[] = [];
+
       if (extracted.contacts?.length > 0) {
         for (const contact of extracted.contacts) {
           if (!contact.full_name) continue;
 
-          // Find matching contact in DB
+          // Use the resolver to find this contact (handles first-name only,
+          // fuzzy matches, and "Mike" → "Michael Smith" cases)
+          const { matched } = await resolveContactNames(userId, [contact.full_name]);
+
+          if (matched.length === 0) {
+            // No match — collect for creation rather than silently losing
+            newContactsToCreate.push(contact);
+            continue;
+          }
+
+          // Re-fetch the matched contact with full fields (resolver returns a subset)
+          const matchedId = matched[0].contact.id;
           const { data: dbContact } = await supabase
             .from("tom_contacts")
-            .select("id, tags, intelligence, intelligence_gaps")
+            .select("id, tags, intelligence, intelligence_gaps, full_name, relationship_type, relationship_tag, dunbar_tier")
             .eq("user_id", userId)
-            .ilike("full_name", contact.full_name)
+            .eq("id", matchedId)
             .maybeSingle();
 
-          if (dbContact && (contact.tags?.length > 0 || contact.intelligence)) {
-            // Merge tags
-            const existingTags = dbContact.tags || [];
-            const newTags = contact.tags || [];
-            const mergedTags = [...existingTags];
-            for (const t of newTags) {
-              const idx = mergedTags.findIndex((e: any) => e.tag === t.tag);
-              if (idx >= 0) { if (t.confidence > mergedTags[idx].confidence) mergedTags[idx] = t; }
-              else mergedTags.push(t);
-            }
+          if (!dbContact) continue;
 
-            // Merge intelligence
-            const existingIntel = dbContact.intelligence || {};
-            const newIntel = contact.intelligence || {};
-            const mergedIntel = mergeDeep(existingIntel, newIntel);
-
-            // Clear gaps that were answered in this conversation
-            const remainingGaps = (dbContact.intelligence_gaps || []).filter((gap: any) => {
-              const field = gap.field || "";
-              // Check if this gap was addressed in the conversation
-              const conversationLower = conversationText.toLowerCase();
-              const gapKeywords = field.split(".").join(" ").toLowerCase();
-              return !conversationLower.includes(gapKeywords.split("_").join(" "));
-            });
-
-            await supabase
-              .from("tom_contacts")
-              .update({
-                tags: mergedTags,
-                intelligence: mergedIntel,
-                intelligence_gaps: remainingGaps,
-                intelligence_scan_at: new Date().toISOString(),
-              })
-              .eq("id", dbContact.id)
-              .eq("user_id", userId);
+          // Merge tags
+          const existingTags = dbContact.tags || [];
+          const newTags = contact.tags || [];
+          const mergedTags = [...existingTags];
+          for (const t of newTags) {
+            const idx = mergedTags.findIndex((e: any) => e.tag === t.tag);
+            if (idx >= 0) { if (t.confidence > mergedTags[idx].confidence) mergedTags[idx] = t; }
+            else mergedTags.push(t);
           }
+
+          // Merge intelligence
+          const existingIntel = dbContact.intelligence || {};
+          const newIntel = contact.intelligence || {};
+          const mergedIntel = mergeDeep(existingIntel, newIntel);
+
+          // Clear gaps that were answered in this conversation
+          const remainingGaps = (dbContact.intelligence_gaps || []).filter((gap: any) => {
+            const field = gap.field || "";
+            const conversationLower = conversationText.toLowerCase();
+            const gapKeywords = field.split(".").join(" ").toLowerCase();
+            return !conversationLower.includes(gapKeywords.split("_").join(" "));
+          });
+
+          // Build update — only overwrite relationship fields if explicitly stated by user
+          const updates: any = {
+            tags: mergedTags,
+            intelligence: mergedIntel,
+            intelligence_gaps: remainingGaps,
+            intelligence_scan_at: new Date().toISOString(),
+          };
+
+          // Apply relationship type/tag/tier ONLY if user was explicit
+          // ("my wife Nicole" = explicit; "I worked with Nicole" = inferred)
+          if (contact.is_explicit_statement) {
+            if (contact.relationship_type) updates.relationship_type = contact.relationship_type;
+            if (contact.relationship_tag) updates.relationship_tag = contact.relationship_tag;
+            if (contact.dunbar_tier) updates.dunbar_tier = contact.dunbar_tier;
+          }
+
+          await supabase
+            .from("tom_contacts")
+            .update(updates)
+            .eq("id", dbContact.id)
+            .eq("user_id", userId);
         }
       }
 
       return NextResponse.json({
         success: true,
         contacts: extracted.contacts || [],
+        new_contacts: newContactsToCreate,        // Names that didn't match anything
+        new_contact_count: newContactsToCreate.length,
         summary: extracted.summary || "",
       });
     }

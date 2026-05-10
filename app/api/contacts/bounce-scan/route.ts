@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createClient } from "@supabase/supabase-js";
 import { getValidAccessToken } from "@/app/lib/google";
+import { isBlockedEmail } from "@/app/lib/contact-blocklist";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -82,7 +83,7 @@ function extractBouncedEmail(headers: any[], userEmail: string | null): string |
     if (lower === userEmail?.toLowerCase()) continue;
     if (lower.includes("daemon")) continue;
     if (lower.includes("postmaster")) continue;
-    if (lower.includes("noreply") || lower.includes("no-reply")) continue;
+    if (isBlockedEmail(lower)) continue;
     return lower;
   }
 

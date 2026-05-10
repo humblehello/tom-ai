@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createClient } from "@supabase/supabase-js";
 import { getValidAccessToken } from "../../lib/google";
+import { isBlockedEmail } from "@/app/lib/contact-blocklist";
 
 export const maxDuration = 60;
 
@@ -21,15 +22,14 @@ const extractEmails = (str: string): string[] => {
   return matches.map(e => e.toLowerCase());
 };
 
+// Local-part blocklist moved to app/lib/contact-blocklist.ts (substring match, 2026-05-10)
 const isJunk = (email: string): boolean => {
-  return (
-    email.includes("noreply") || email.includes("no-reply") ||
-    email.includes("donotreply") || email.includes("notification") ||
-    email.includes("mailer-daemon") || email.includes("postmaster") ||
-    email.includes("unsubscribe") || email.includes("bounce") ||
-    email.includes("support@") || email.endsWith(".amazonaws.com") ||
-    email.endsWith(".sendgrid.net")
-  );
+  if (isBlockedEmail(email)) return true;
+  // Domain suffix checks for sending infrastructure
+  const lower = email.toLowerCase();
+  if (lower.endsWith(".amazonaws.com")) return true;
+  if (lower.endsWith(".sendgrid.net")) return true;
+  return false;
 };
 
 export async function POST(req: NextRequest) {

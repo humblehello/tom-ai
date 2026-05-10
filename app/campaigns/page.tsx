@@ -922,6 +922,8 @@ function CampaignsPageInner() {
     // Check if coming from audience page with pre-selected audience
     const audienceId = searchParams.get("audience");
     if (audienceId) handleNewCampaign(audienceId);
+    // OR check if coming from dashboard "Build a Campaign" CTA
+    if (searchParams.get("new") === "1") handleNewCampaign();
   }, []);
 
   const loadAll = async () => {

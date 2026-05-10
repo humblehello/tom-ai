@@ -393,9 +393,12 @@ export async function createGoogleContact(
       return null;
     }
 
-    // Add to myContacts group
+   // Add to myContacts group (optional — contact already exists in Google)
+    // Google's myContacts group has a soft cap (~20K) that fires MY_CONTACTS_OVERFLOW_COUNT.
+    // If this fails, the contact still exists in Google — it just won't show in the
+    // default "Contacts" group view (it's in "Other contacts" instead).
     try {
-      await fetch(`https://people.googleapis.com/v1/contactGroups/myContacts/members:modify`, {
+      const groupRes = await fetch(`https://people.googleapis.com/v1/contactGroups/myContacts/members:modify`, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${accessToken}`,
@@ -405,8 +408,21 @@ export async function createGoogleContact(
           resourceNamesToAdd: [responseData.resourceName]
         }),
       });
+
+      if (!groupRes.ok) {
+        const errData = await groupRes.json().catch(() => ({}));
+        const isOverflow = errData?.error?.message?.includes("MY_CONTACTS_OVERFLOW_COUNT");
+
+        if (isOverflow) {
+          // Expected when group is at cap — contact still exists in Google
+          console.log(`myContacts group at cap, contact ${responseData.resourceName} created in Other contacts`);
+        } else {
+          // Unexpected — log but don't fail the parent operation
+          console.warn(`myContacts group-add returned ${groupRes.status}:`, errData?.error?.message);
+        }
+      }
     } catch (e) {
-      console.error("Failed to add to myContacts group:", e);
+      console.warn("myContacts group-add network error (non-fatal):", e);
     }
     return responseData.resourceName;
   } catch (e) {

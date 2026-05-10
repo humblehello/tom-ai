@@ -892,8 +892,17 @@ function ReachOutPanel({ contact, onClose }: { contact: Contact; onClose: () => 
   const [showSchedule, setShowSchedule] = useState(false);
   const [scheduleDate, setScheduleDate] = useState("");
   const [scheduleTime, setScheduleTime] = useState("09:00");
-  const [scheduled, setScheduled] = useState(false);
-  const firstName = contact.full_name.split(" ")[0];
+const [scheduled, setScheduled] = useState(false);
+const [emailProvider, setEmailProvider] = useState<"google" | "microsoft">("google");
+const [draftMeta, setDraftMeta] = useState<{ confidence: number; mode: "personal" | "generic"; hint?: string } | null>(null);
+const firstName = contact.full_name.split(" ")[0];
+
+useEffect(() => {
+  fetch("/api/auth/me")
+    .then(r => r.json())
+    .then(d => setEmailProvider((d.primary_email_provider as "google" | "microsoft") || "google"))
+    .catch(() => {});
+}, []);
 
   const lStyle = { fontSize: 11, fontWeight: 700 as const, color: C.text3, textTransform: "uppercase" as const, letterSpacing: "0.08em", marginBottom: 6, display: "block" as const };
   const OCCASIONS = ["Thinking of you", "Thank you", "Congratulations", "Happy Birthday", "Just because", "Other"];
@@ -915,12 +924,15 @@ function ReachOutPanel({ contact, onClose }: { contact: Contact; onClose: () => 
       const data = await res.json();
       // Don't overwrite if we've switched to card mode
       if (generatingRef.current !== "email") return;
-      setMessage(data.message || `Hey ${firstName} — you've been on my mind. How are things going?`);
-      setSubject(data.subject || `thinking of you`);
+      setMessage(data.message || `Hey ${firstName} — wanted to say hello and see how you're doing.`);
+      setSubject(data.subject || `Hey`);
+      if (typeof data.confidence === "number") {
+        setDraftMeta({ confidence: data.confidence, mode: data.mode || "personal", hint: data.hint });
+      }
     } catch { 
       if (generatingRef.current !== "email") return;
-      setMessage(`Hey ${firstName} — you've been on my mind. How are things going?`); 
-      setSubject(`thinking of you`); 
+      setMessage(`Hey ${firstName} — wanted to say hello and see how you're doing.`); 
+      setSubject(`Hey`); 
     }
     setGenerating(false);
   };
@@ -931,7 +943,7 @@ function ReachOutPanel({ contact, onClose }: { contact: Contact; onClose: () => 
     try {
       const res = await fetch("/api/email/send", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ contact_id: contact.id, contact_email: contact.email, contact_name: contact.full_name, subject, body: message }) });
       const data = await res.json();
-      if (data.success) setSent(true); else alert("Failed to send — check your Gmail connection");
+      if (data.success) setSent(true); else alert(`Failed to send — check your ${emailProvider === "microsoft" ? "Outlook" : "Gmail"} connection in Settings`);
     } catch { alert("Failed to send email"); }
     setSending(false);
   };
@@ -996,7 +1008,7 @@ function ReachOutPanel({ contact, onClose }: { contact: Contact; onClose: () => 
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", zIndex: 1100, display: "flex", alignItems: "flex-end", justifyContent: "center" }} onClick={onClose}>
       <div onClick={e => e.stopPropagation()} style={{ background: C.bg2, borderRadius: "16px 16px 0 0", width: "100%", maxWidth: 560, padding: 32, boxShadow: "0 -8px 40px rgba(0,0,0,0.15)", textAlign: "center" }}>
         <div style={{ fontSize: 16, fontWeight: 700, color: C.text, marginBottom: 8 }}>Email sent to {firstName}!</div>
-        <div style={{ fontSize: 13, color: C.text3, marginBottom: 20 }}>It'll show up in your Gmail sent folder.</div>
+        <div style={{ fontSize: 13, color: C.text3, marginBottom: 20 }}>It'll show up in your {emailProvider === "microsoft" ? "Outlook" : "Gmail"} sent folder.</div>
         <button onClick={onClose} style={{ padding: "10px 24px", borderRadius: 8, border: "none", background: C.green, color: "#fff", fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: font }}>Done</button>
       </div>
     </div>
@@ -1132,7 +1144,38 @@ function ReachOutPanel({ contact, onClose }: { contact: Contact; onClose: () => 
             ) : (
               <>
                 <input value={subject} onChange={e => setSubject(e.target.value)} placeholder="Subject line" style={{ width: "100%", padding: "10px 14px", borderRadius: 8, border: `1px solid ${C.border2}`, background: C.bg3, color: C.text, fontSize: 13, fontFamily: font, outline: "none", boxSizing: "border-box" as const, marginBottom: 8 }} />
-                <textarea value={message} onChange={e => setMessage(e.target.value)} rows={4} style={{ width: "100%", background: C.bg3, border: `1px solid ${C.border2}`, borderRadius: 8, padding: "12px 16px", fontSize: 13, color: C.text, fontFamily: font, resize: "none" as const, outline: "none", boxSizing: "border-box" as const, lineHeight: 1.6, marginBottom: 12 }} />
+                <textarea value={message} onChange={e => setMessage(e.target.value)} rows={4} style={{ width: "100%", background: C.bg3, border: `1px solid ${C.border2}`, borderRadius: 8, padding: "12px 16px", fontSize: 13, color: C.text, fontFamily: font, resize: "none" as const, outline: "none", boxSizing: "border-box" as const, lineHeight: 1.6, marginBottom: 8 }} />
+                {draftMeta && (
+                  <div style={{
+                    display: "flex", alignItems: "center", gap: 8, marginBottom: 12,
+                    padding: "8px 12px", borderRadius: 8,
+                    background: draftMeta.mode === "personal" 
+                      ? (draftMeta.confidence >= 0.85 ? C.greenLight : C.blueLight)
+                      : C.amberLight,
+                    border: `1px solid ${draftMeta.mode === "personal"
+                      ? (draftMeta.confidence >= 0.85 ? C.green + "44" : C.blue + "44")
+                      : C.amber + "44"}`,
+                  }}>
+                    <span style={{ 
+                      fontSize: 11, fontWeight: 700,
+                      color: draftMeta.mode === "personal" 
+                        ? (draftMeta.confidence >= 0.85 ? C.green : C.blue)
+                        : C.amber,
+                    }}>
+                      {draftMeta.mode === "personal" 
+                        ? (draftMeta.confidence >= 0.85 ? "✦ Highly Personal" : "✓ Personalized")
+                        : "💬 Generic"}
+                    </span>
+                    <span style={{ fontSize: 11, color: C.text3 }}>
+                      {Math.round(draftMeta.confidence * 100)}% confidence
+                    </span>
+                    {draftMeta.hint && (
+                      <span style={{ fontSize: 10, color: C.text4, marginLeft: "auto", textAlign: "right" as const, maxWidth: 280 }}>
+                        {draftMeta.hint}
+                      </span>
+                    )}
+                  </div>
+                )}
               </>
             )}
             {showSchedule && (
@@ -1154,7 +1197,16 @@ function ReachOutPanel({ contact, onClose }: { contact: Contact; onClose: () => 
               <button onClick={() => setShowSchedule(!showSchedule)} style={{ padding: "12px 14px", borderRadius: 8, border: `1px solid ${showSchedule ? C.blue : C.border2}`, background: showSchedule ? C.blueLight : C.bg2, color: showSchedule ? C.blue : C.text3, fontSize: 13, cursor: "pointer", fontFamily: font }}>Later</button>
               <button onClick={() => generateMessage(cardOccasion)} disabled={generating} style={{ padding: "12px 14px", borderRadius: 8, border: `1px solid ${C.border2}`, background: C.bg2, color: C.text3, fontSize: 13, cursor: "pointer", fontFamily: font }}>↻</button>
             </div>
-            {contact.email && <div style={{ textAlign: "center", marginTop: 12 }}><button onClick={() => window.open(`https://mail.google.com/mail/?view=cm&to=${encodeURIComponent(contact.email)}&su=${encodeURIComponent(subject)}&body=${encodeURIComponent(message)}`, "_blank")} style={{ background: "none", border: "none", color: C.text4, fontSize: 11, cursor: "pointer", textDecoration: "underline", fontFamily: font }}>Open in Gmail instead</button></div>}
+            {contact.email && <div style={{ textAlign: "center", marginTop: 12 }}>
+  <button onClick={() => {
+    const url = emailProvider === "microsoft"
+      ? `https://outlook.office.com/mail/deeplink/compose?to=${encodeURIComponent(contact.email!)}&subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(message)}`
+      : `https://mail.google.com/mail/?view=cm&to=${encodeURIComponent(contact.email!)}&su=${encodeURIComponent(subject)}&body=${encodeURIComponent(message)}`;
+    window.open(url, "_blank");
+  }} style={{ background: "none", border: "none", color: C.text4, fontSize: 11, cursor: "pointer", textDecoration: "underline", fontFamily: font }}>
+    Open in {emailProvider === "microsoft" ? "Outlook" : "Gmail"} instead
+  </button>
+</div>}
           </>
         )}
       </div>
@@ -1202,6 +1254,7 @@ const [bulkTag, setBulkTag] = useState<string>("");
   const [mergeCount, setMergeCount] = useState<number | null>(null);
   const [showHopperModal, setShowHopperModal] = useState(false);
   const [pendingCount, setPendingCount] = useState<number>(0);
+  const [emailProvider, setEmailProvider] = useState<"google" | "microsoft">("google");
   const [showPendingModal, setShowPendingModal] = useState(false);
   const [pendingContacts, setPendingContacts] = useState<any[]>([]);
   const [activeChips, setActiveChips] = useState<Set<string>>(new Set());
@@ -1235,7 +1288,6 @@ const [bulkTag, setBulkTag] = useState<string>("");
 };
 
   useEffect(() => {
-  // Load lightweight search index of all contacts
   fetch("/api/contacts?limit=5000&offset=0")
     .then(r => r.json())
     .then(d => setSearchIndex(d.contacts || []))
@@ -1244,9 +1296,20 @@ const [bulkTag, setBulkTag] = useState<string>("");
     .then(r => r.json())
     .then(d => setMergeCount(d.items?.length || 0))
     .catch(() => {});
-  fetch("/api/contacts/google-pending")
+
+  // Load provider first, then load the right pending count
+  fetch("/api/auth/me")
     .then(r => r.json())
-    .then(d => setPendingCount(d.count || 0))
+    .then(d => {
+      const provider = (d.primary_email_provider as "google" | "microsoft") || "google";
+      setEmailProvider(provider);
+      const pendingUrl = provider === "microsoft" 
+        ? "/api/contacts/microsoft-pending" 
+        : "/api/contacts/google-pending";
+      return fetch(pendingUrl);
+    })
+    .then(r => r?.json())
+    .then(d => setPendingCount(d?.count || 0))
     .catch(() => {});
 }, []);
 
@@ -1314,10 +1377,19 @@ const loadContacts = async (type = "all", health = "all", gift = false, attentio
   setLoading(false);
 };
 
-const handlePullFromGoogle = async () => {
-    setSyncing(true); setSyncResult(null);
-    let pageToken = ""; let totalSynced = 0; let totalBirthdays = 0; let pages = 0;
-    try {
+const handlePullFromProvider = async () => {
+  setSyncing(true); setSyncResult(null);
+  try {
+    if (emailProvider === "microsoft") {
+      const res = await fetch("/api/contacts/microsoft-sync");
+      const data = await res.json();
+      setSyncResult({ synced: data.synced || 0, birthdays: 0, direction: "pull" });
+      fetch("/api/contacts/microsoft-pending")
+        .then(r => r.json())
+        .then(d => setPendingCount(d.count || 0))
+        .catch(() => {});
+    } else {
+      let pageToken = ""; let totalSynced = 0; let totalBirthdays = 0; let pages = 0;
       do {
         const url = `/api/contacts/google-sync${pageToken ? `?pageToken=${pageToken}` : ""}`;
         const res = await fetch(url);
@@ -1329,26 +1401,33 @@ const handlePullFromGoogle = async () => {
         pages++;
       } while (pageToken && pages < 300);
       setSyncResult({ synced: totalSynced, birthdays: totalBirthdays, direction: "pull" });
-      // Refresh pending count
       fetch("/api/contacts/google-pending")
         .then(r => r.json())
         .then(d => setPendingCount(d.count || 0))
         .catch(() => {});
-      localStorage.removeItem(CACHE_KEY);
-      loadContacts("all", "all", false, false, true);
-    } catch (e) { console.error(e); }
-    setSyncing(false);
-  };
+    }
+    localStorage.removeItem(CACHE_KEY);
+    loadContacts("all", "all", false, false, true);
+  } catch (e) { console.error(e); }
+  setSyncing(false);
+};
 
-  const handlePushToGoogle = async () => {
-    setPushing(true);
-    try {
-      const res = await fetch("/api/contacts/google-backfill", { method: "POST" });
-      const data = await res.json();
-      setSyncResult({ pushed: data.missing, direction: "push" });
-    } catch (e) { console.error(e); }
-    setPushing(false);
-  };
+const handlePushToProvider = async () => {
+  setPushing(true);
+  try {
+    const endpoint = emailProvider === "microsoft" 
+      ? "/api/contacts/microsoft-backfill" 
+      : "/api/contacts/google-backfill";
+    const res = await fetch(endpoint, { method: "POST" });
+    const data = await res.json();
+    setSyncResult({ 
+      pushed: data.pushed || data.missing || 0, 
+      direction: "push",
+      queued: data.queued || false,
+    });
+  } catch (e) { console.error(e); }
+  setPushing(false);
+};
 
   const handleSaveEdit = async (updated: Partial<Contact>) => {
     if (!editContact) return;
@@ -1659,19 +1738,22 @@ if (filterGiftReady) filtered = filtered.filter(c => c.gifting_eligible || c.hom
               style={{ padding: "10px 18px", borderRadius: 8, border: "none", background: enriching ? C.bg3 : C.purple, color: enriching ? C.text4 : "#fff", fontSize: 13, fontWeight: 600, cursor: enriching ? "default" : "pointer", fontFamily: font, transition: "all 0.15s" }}>
               {enriching ? "Enriching..." : "⚡ Enrich"}
             </button>
-            <button onClick={handlePushToGoogle} disabled={pushing}
-              style={{ padding: "10px 18px", borderRadius: 8, border: "none", background: pushing ? C.bg3 : C.green, color: pushing ? C.text4 : "#fff", fontSize: 13, fontWeight: 600, cursor: pushing ? "default" : "pointer", fontFamily: font }}>
-              {pushing ? "Pushing..." : "↑ Push to Google"}
-            </button>
-            <button onClick={pendingCount > 0 ? async () => {
+           <button onClick={handlePushToProvider} disabled={pushing}
+  style={{ padding: "10px 18px", borderRadius: 8, border: "none", background: pushing ? C.bg3 : C.green, color: pushing ? C.text4 : "#fff", fontSize: 13, fontWeight: 600, cursor: pushing ? "default" : "pointer", fontFamily: font }}>
+  {pushing ? "Pushing..." : `↑ Push to ${emailProvider === "microsoft" ? "Outlook" : "Google"}`}
+</button>
+<button onClick={pendingCount > 0 ? async () => {
   setShowPendingModal(true);
-  const res = await fetch("/api/contacts/google-pending");
+  const endpoint = emailProvider === "microsoft" 
+    ? "/api/contacts/microsoft-pending" 
+    : "/api/contacts/google-pending";
+  const res = await fetch(endpoint);
   const data = await res.json();
   setPendingContacts(data.contacts || []);
-} : handlePullFromGoogle} disabled={syncing}
-              style={{ padding: "10px 18px", borderRadius: 8, border: `1px solid ${pendingCount > 0 ? C.amber : C.border2}`, background: syncing ? C.bg3 : pendingCount > 0 ? C.amberLight : C.bg2, color: syncing ? C.text4 : pendingCount > 0 ? C.amber : C.text2, fontSize: 13, fontWeight: 700, cursor: syncing ? "default" : "pointer", fontFamily: font }}>
-              {syncing ? "Pulling..." : pendingCount > 0 ? `Approve Contacts (${pendingCount})` : "↓ Pull from Google"}
-            </button>
+} : handlePullFromProvider} disabled={syncing}
+  style={{ padding: "10px 18px", borderRadius: 8, border: `1px solid ${pendingCount > 0 ? C.amber : C.border2}`, background: syncing ? C.bg3 : pendingCount > 0 ? C.amberLight : C.bg2, color: syncing ? C.text4 : pendingCount > 0 ? C.amber : C.text2, fontSize: 13, fontWeight: 700, cursor: syncing ? "default" : "pointer", fontFamily: font }}>
+  {syncing ? "Pulling..." : pendingCount > 0 ? `Approve Contacts (${pendingCount})` : `↓ Pull from ${emailProvider === "microsoft" ? "Outlook" : "Google"}`}
+</button>
             <button onClick={() => setShowClean(true)}
               style={{ padding: "10px 18px", borderRadius: 8, border: `1px solid ${C.redLight}`, background: C.redLight, color: C.red, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: font }}>
               Clean
@@ -1692,8 +1774,10 @@ if (filterGiftReady) filtered = filtered.filter(c => c.gifting_eligible || c.hom
         {syncResult && (
           <div style={{ background: C.greenLight, border: `1px solid ${C.green}`, borderRadius: 8, padding: "10px 16px", marginBottom: 16, fontSize: 13, color: C.green }}>
             {syncResult.direction === "push"
-              ? `Push started — ${syncResult.pushed} contacts queued for Google sync`
-              : `Pulled from Google — ${syncResult.synced} new contacts · ${syncResult.birthdays} birthdays found`}
+              ? syncResult.queued
+                ? `Queued ${syncResult.pushed} contacts for ${emailProvider === "microsoft" ? "Outlook" : "Google"} sync. Running in background — should finish in ~${Math.ceil((syncResult.pushed * 0.5) / 60)} minutes.`
+                : `Push started — ${syncResult.pushed} contacts queued for ${emailProvider === "microsoft" ? "Outlook" : "Google"} sync`
+              : `Pulled from ${emailProvider === "microsoft" ? "Outlook" : "Google"} — ${syncResult.synced} new contacts${syncResult.birthdays ? ` · ${syncResult.birthdays} birthdays found` : ""}`}
           </div>
         )}
 
@@ -2028,12 +2112,13 @@ if (filterGiftReady) filtered = filtered.filter(c => c.gifting_eligible || c.hom
           <div onClick={e => e.stopPropagation()} style={{ background: C.bg, borderRadius: 16, width: "100%", maxWidth: 600, maxHeight: "88vh", display: "flex", flexDirection: "column", boxShadow: "0 24px 80px rgba(0,0,0,0.2)" }}>
             <div style={{ padding: "20px 24px", borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0 }}>
               <div>
-                <div style={{ fontSize: 16, fontWeight: 700, color: C.text }}>New contacts from Google</div>
+                <div style={{ fontSize: 16, fontWeight: 700, color: C.text }}>New contacts from {emailProvider === "microsoft" ? "Outlook" : "Google"}</div>
                 <div style={{ fontSize: 12, color: C.text3, marginTop: 2 }}>{pendingCount} contacts waiting for approval</div>
               </div>
               <div style={{ display: "flex", gap: 8 }}>
                 <button onClick={async () => {
-                  await fetch("/api/contacts/google-pending", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "approve_all" }) });
+                  const endpoint = emailProvider === "microsoft" ? "/api/contacts/microsoft-pending" : "/api/contacts/google-pending";
+                  await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "approve_all" }) });
                   setPendingCount(0);
                   setPendingContacts([]);
                   setShowPendingModal(false);
@@ -2043,7 +2128,8 @@ if (filterGiftReady) filtered = filtered.filter(c => c.gifting_eligible || c.hom
                   Approve all
                 </button>
                 <button onClick={async () => {
-                  await fetch("/api/contacts/google-pending", { method: "DELETE" });
+                  const endpoint = emailProvider === "microsoft" ? "/api/contacts/microsoft-pending" : "/api/contacts/google-pending";
+                  await fetch(endpoint, { method: "DELETE" });
                   setPendingCount(0);
                   setPendingContacts([]);
                   setShowPendingModal(false);
@@ -2065,14 +2151,16 @@ if (filterGiftReady) filtered = filtered.filter(c => c.gifting_eligible || c.hom
                   </div>
                   <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
                     <button onClick={async () => {
-                      await fetch("/api/contacts/google-pending", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "approve", id: c.id }) });
+                      const endpoint = emailProvider === "microsoft" ? "/api/contacts/microsoft-pending" : "/api/contacts/google-pending";
+                      await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "approve", id: c.id }) });
                       setPendingContacts(prev => prev.filter(p => p.id !== c.id));
                       setPendingCount(prev => prev - 1);
                       localStorage.removeItem(CACHE_KEY);
                       loadContacts("all", "all", false, false, true);
                     }} style={{ padding: "6px 12px", borderRadius: 6, border: "none", background: C.green, color: "#fff", fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: font }}>Add</button>
                     <button onClick={async () => {
-                      await fetch("/api/contacts/google-pending", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "dismiss", id: c.id }) });
+                      const endpoint = emailProvider === "microsoft" ? "/api/contacts/microsoft-pending" : "/api/contacts/google-pending";
+                      await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "dismiss", id: c.id }) });
                       setPendingContacts(prev => prev.filter(p => p.id !== c.id));
                       setPendingCount(prev => prev - 1);
                     }} style={{ padding: "6px 12px", borderRadius: 6, border: `1px solid ${C.border2}`, background: C.bg2, color: C.text3, fontSize: 12, cursor: "pointer", fontFamily: font }}>Dismiss</button>
@@ -2081,8 +2169,8 @@ if (filterGiftReady) filtered = filtered.filter(c => c.gifting_eligible || c.hom
               ))}
             </div>
             <div style={{ padding: "12px 24px", borderTop: `1px solid ${C.border}`, flexShrink: 0 }}>
-              <button onClick={handlePullFromGoogle} disabled={syncing} style={{ width: "100%", padding: "10px", borderRadius: 8, border: `1px solid ${C.border2}`, background: C.bg2, color: C.text2, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: font }}>
-                {syncing ? "Pulling..." : "↓ Pull from Google for more"}
+              <button onClick={handlePullFromProvider} disabled={syncing} style={{ width: "100%", padding: "10px", borderRadius: 8, border: `1px solid ${C.border2}`, background: C.bg2, color: C.text2, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: font }}>
+                {syncing ? "Pulling..." : `↓ Pull from ${emailProvider === "microsoft" ? "Outlook" : "Google"} for more`}
               </button>
             </div>
           </div>

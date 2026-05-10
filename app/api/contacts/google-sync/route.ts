@@ -3,6 +3,7 @@ import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 import { getValidAccessToken } from "@/app/lib/google";
 import { updateGoogleContact } from "@/app/lib/googleContacts";
+import { isBlockedEmail } from "@/app/lib/contact-blocklist";
 
 function fmtPhone(raw: string): string {
   if (!raw) return raw;
@@ -163,45 +164,17 @@ export async function GET(req: Request) {
 const googleEmail = person.emailAddresses?.[0]?.value || null;
 const allEmails = person.emailAddresses?.map((e: any) => e.value).filter(Boolean) || [];
 
-// Skip obvious spam/newsletter contacts
-const BLOCKED_LOCAL_PARTS = new Set([
-  "noreply","no-reply","donotreply","do-not-reply",
-  "notifications","notification","notify",
-  "mailer","mailer-daemon","postmaster","bounce","bounces",
-  "support","help","helpdesk",
-  "info","information",
-  "hello","hi",
-  "team","teams",
-  "admin","administrator",
-  "contact","contacts",
-  "sales","marketing",
-  "newsletter","newsletters",
-  "updates","update",
-  "alerts","alert",
-  "billing","invoice","invoices","payments","receipts",
-  "communication","communications",
-  "ap","ar","accounting",
-  "careers","jobs","hiring",
-  "unsubscribe","optout",
-  "automated","automate","automatic",
-  "system","robot","bot","notetaker",
-  "jobalert", "fyxer", "sales", "customer"
-]);
-
+// Local-part blocklist moved to app/lib/contact-blocklist.ts (substring match, 2026-05-10)
+// Domain blocklist kept inline — these are sending-infrastructure domains, not local-part keywords
 const BLOCKED_DOMAINS = [
   "stripe.com","mailchimp.com","sendgrid.net","constantcontact.com",
-  "shared1.ccsend.com","scoop.","amazonses.com","hubspot.com", 
+  "shared1.ccsend.com","scoop.","amazonses.com","hubspot.com",
 ];
 
 const isJunk = (() => {
   if (!googleEmail) return false;
-  const lower = googleEmail.toLowerCase();
-  const atIndex = lower.indexOf("@");
-  if (atIndex === -1) return false;
-  const local = lower.slice(0, atIndex);
-  const domain = lower.slice(atIndex + 1);
-  if (BLOCKED_LOCAL_PARTS.has(local)) return true;
-  if (local.startsWith("noreply") || local.startsWith("no_reply") || local.startsWith("donotreply") || local.startsWith("bounce") || local.startsWith("mailer")) return true;
+  if (isBlockedEmail(googleEmail)) return true;
+  const domain = googleEmail.toLowerCase().split("@")[1] || "";
   if (BLOCKED_DOMAINS.some(d => domain.includes(d))) return true;
   return false;
 })();
