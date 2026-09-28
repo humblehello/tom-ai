@@ -3,6 +3,8 @@ import { cookies } from "next/headers";
 import { checkFeature } from "@/app/lib/requireFeature";
 import { createClient } from "@supabase/supabase-js";
 import { createGoogleContact } from "../../../lib/googleContacts";
+import { emailAssignmentDecision, fillBlankFields } from "../../../lib/contactFieldPolicy";
+import { findContactsWithEmail, insertContact, selectContacts, updateContact } from "../../../lib/contactWrite";
 import { getValidAccessToken } from "../../../lib/google";
 import { inngest } from "../../../lib/inngest";
 
@@ -170,25 +172,29 @@ async function saveContact(contact: any, userId: string, accessToken: string | n
 // Check for existing contact — merge if found
     let existingId: string | null = null;
     if (contact.email) {
-      const { data: existing } = await supabase
-        .from("tom_contacts")
-        .select("id, phone, company, job_title, birthday, home_address")
-        .eq("user_id", userId)
-        .ilike("email", contact.email.trim())
-        .maybeSingle();
-
-      if (existing) {
-        // Merge — fill in missing fields only
-        const patch: any = {};
-        if (!existing.phone && contact.phone) patch.phone = contact.phone;
-        if (!existing.company && contact.company) patch.company = contact.company;
-        if (!existing.job_title && contact.job_title) patch.job_title = contact.job_title;
-        if (!existing.birthday && contact.birthday) patch.birthday = contact.birthday;
-        if (!existing.home_address && contact.home_address) patch.home_address = contact.home_address;
-
+      const owners = await findContactsWithEmail(supabase, userId, contact.email.trim());
+      const decision = emailAssignmentDecision({
+        incomingEmail: contact.email,
+        incomingName: contact.full_name,
+        owners,
+      });
+      if (decision === "reject") return "skipped";
+      if (decision === "same_person" && owners[0]) {
+        const { data: existing } = await selectContacts(
+          supabase,
+          "id, phone, company, job_title, birthday, home_address, full_name",
+          (query) => query.eq("user_id", userId).eq("id", owners[0].id).maybeSingle()
+        );
+        if (!existing) return "skipped";
+        const patch = fillBlankFields(
+          existing,
+          contact,
+          ["phone", "company", "job_title", "birthday", "home_address"],
+          "human"
+        );
         if (Object.keys(patch).length > 0) {
-          await supabase.from("tom_contacts").update(patch).eq("id", existing.id).eq("user_id", userId);
-          return "imported"; // count as imported since we updated something
+          await updateContact(supabase, existing.id, userId, patch);
+          return "imported";
         }
         return "skipped";
       }
@@ -207,22 +213,31 @@ async function saveContact(contact: any, userId: string, accessToken: string | n
     }
 
     // Insert to Supabase
-    const { data: newContact, error } = await supabase
-      .from("tom_contacts")
-      .insert({
-        user_id: userId,
-        full_name: contact.full_name.trim(),
-        email: contact.email?.toLowerCase().trim() || null,
-        phone: contact.phone || null,
-        company: contact.company || null,
-        job_title: contact.job_title || null,
-        notes: contact.notes || null,
-        birthday: contact.birthday || null,
-        home_address: contact.home_address || null,
-        last_synced_at: new Date().toISOString(),
-      })
-      .select()
-      .single();
+    const insertedRow = {
+      user_id: userId,
+      full_name: contact.full_name.trim(),
+      email: contact.email?.toLowerCase().trim() || null,
+      phone: contact.phone || null,
+      company: contact.company || null,
+      job_title: contact.job_title || null,
+      notes: contact.notes || null,
+      birthday: contact.birthday || null,
+      home_address: contact.home_address || null,
+      last_synced_at: new Date().toISOString(),
+    };
+    const { data: newContact, error } = await insertContact(
+      supabase,
+      {
+        ...insertedRow,
+        field_provenance: fillBlankFields(
+          null,
+          insertedRow,
+          ["full_name", "email", "phone", "company", "job_title", "notes", "birthday", "home_address"],
+          "human"
+        ).field_provenance,
+      },
+      { returning: true }
+    );
 
     if (error || !newContact) return "error";
 

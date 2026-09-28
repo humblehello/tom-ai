@@ -3,6 +3,8 @@ import { cookies } from "next/headers";
 import { createClient } from "@supabase/supabase-js";
 import { updateGoogleContact, createGoogleContact } from "../../../lib/googleContacts";
 import { isBlockedEmail } from "@/app/lib/contact-blocklist";
+import { fillBlankFields } from "../../../lib/contactFieldPolicy";
+import { emailTakenBySomeoneElse, insertContact, updateContact } from "../../../lib/contactWrite";
 
 // Local-part blocklist moved to app/lib/contact-blocklist.ts (substring match, 2026-05-10)
 // Domain blocklist kept inline — these are sending-infrastructure domains, not local-part keywords
@@ -301,27 +303,16 @@ ${e.body}
       const personWasSender = emailDetails.some(e => e.primary_sender_email === personEmail);
       const trustedPhone = personWasSender ? person.phone : null;
 
-      // Try to find existing contact by email then name
-      let contact = null;
-
-      const { data: byEmail } = await supabase
+      // Match only on email. A same-name fallback was attaching one person's
+      // signature phone and email onto a different person.
+      const { data: emailMatches } = await supabase
         .from("tom_contacts")
         .select("*")
         .eq("user_id", effectiveUserId)
         .ilike("email", personEmail)
-        .single();
-      contact = byEmail;
-
-      if (!contact) {
-        const { data: byName } = await supabase
-          .from("tom_contacts")
-          .select("*")
-          .eq("user_id", effectiveUserId)
-          .ilike("full_name", person.full_name)
-          .limit(1)
-          .single();
-        contact = byName;
-      }
+        .limit(2);
+      if ((emailMatches || []).length > 1) continue;
+      const contact = emailMatches?.[0] || null;
 
       if (!contact) {
         // ── New contact — must pass ALL quality gates ──
@@ -330,10 +321,18 @@ ${e.body}
         const isClean = !isBlockedSender(personEmail);
 
         if (!isTwoWay || !isFrequent || !isClean) continue;
+        const emailDecision = await emailTakenBySomeoneElse(
+          supabase,
+          effectiveUserId,
+          personEmail,
+          null,
+          person.full_name
+        );
+        if (emailDecision !== "allow") continue;
 
-        const { data: newContact } = await supabase
-          .from("tom_contacts")
-          .insert({
+        const { data: newContact } = await insertContact(
+          supabase,
+          {
             user_id: effectiveUserId,
             google_contact_id: `email_scrape_${Date.now()}_${Math.random()}`,
             full_name: person.full_name,
@@ -343,9 +342,15 @@ ${e.body}
             last_emailed_at: lastEmailDate,
             email_count: emailCount,
             last_synced_at: new Date().toISOString(),
-          })
-          .select()
-          .single();
+            field_provenance: fillBlankFields(null, {
+              email: personEmail,
+              phone: trustedPhone,
+              home_address: person.address,
+              full_name: person.full_name,
+            }, ["email", "phone", "home_address", "full_name"], "scrape").field_provenance,
+          },
+          { returning: true }
+        );
 
         if (newContact) {
           const googleResourceName = await createGoogleContact(user.access_token, {
@@ -380,38 +385,26 @@ ${e.body}
       }
 
       // ── Existing contact — enrich missing fields only ──
-      const updates: Record<string, any> = {};
       const logs: any[] = [];
-
-      // Only update phone if:
-      // 1. Contact doesn't already have one
-      // 2. We trust the attribution (person was the actual sender)
-      if (trustedPhone && !contact.phone) {
-        updates.phone = trustedPhone;
-        logs.push({ field_updated: "phone", old_value: null, new_value: trustedPhone });
+      const filled = fillBlankFields(
+        contact,
+        {
+          phone: trustedPhone,
+          home_address: personWasSender && person.address?.streetAddress ? person.address : null,
+        },
+        ["phone", "home_address"],
+        "scrape"
+      );
+      if (filled.phone) logs.push({ field_updated: "phone", old_value: null, new_value: filled.phone });
+      if (filled.home_address) {
+        logs.push({
+          field_updated: "home_address",
+          old_value: contact.home_address ? JSON.stringify(contact.home_address) : null,
+          new_value: JSON.stringify(filled.home_address),
+        });
       }
 
-      if (person.email && !contact.email) {
-        updates.email = personEmail;
-        logs.push({ field_updated: "email", old_value: null, new_value: personEmail });
-      }
-
-      if (person.address?.streetAddress && personWasSender) {
-        const existingAddr = contact.home_address;
-        const missingAddr = !existingAddr || !existingAddr.streetAddress;
-        const missingCity = existingAddr && !existingAddr.city && person.address.city;
-        const missingZip = existingAddr && !existingAddr.zip && person.address.zip;
-
-        if (missingAddr || missingCity || missingZip) {
-          const merged = { ...(existingAddr || {}), ...person.address };
-          updates.home_address = merged;
-          logs.push({
-            field_updated: "home_address",
-            old_value: existingAddr ? JSON.stringify(existingAddr) : null,
-            new_value: JSON.stringify(merged),
-          });
-        }
-      }
+      const updates: Record<string, any> = { ...filled };
 
       updates.last_emailed_at = lastEmailDate;
       updates.email_count = (contact.email_count || 0) + emailCount;
@@ -427,10 +420,7 @@ ${e.body}
         });
       }
 
-      await supabase
-        .from("tom_contacts")
-        .update(updates)
-        .eq("id", contact.id);
+      await updateContact(supabase, contact.id, effectiveUserId, updates);
 
       if (
         user.access_token &&

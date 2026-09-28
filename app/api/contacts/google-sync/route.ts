@@ -2,8 +2,10 @@ import { createClient } from "@supabase/supabase-js";
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
 import { getValidAccessToken } from "@/app/lib/google";
-import { updateGoogleContact } from "@/app/lib/googleContacts";
 import { isBlockedEmail } from "@/app/lib/contact-blocklist";
+import { emailAssignmentDecision, normalizeEmail } from "@/app/lib/contactFieldPolicy";
+import { findContactsWithEmail } from "@/app/lib/contactWrite";
+import { applyGoogleToExisting, createFromGoogle, loadContactById, loadContactByResource } from "@/app/lib/googleContactSync";
 
 function fmtPhone(raw: string): string {
   if (!raw) return raw;
@@ -32,7 +34,9 @@ function fixReversedName(displayName: string, givenName: string, familyName: str
   return displayName;
 }
 
-// READ: Pull from Google Contacts → Supabase (last-write-wins + deletion sync)
+// READ: Pull from Google Contacts → Supabase.
+// Google is master per field, except fields a person edited in Humble Hello.
+// Those stay, and are written back, until Google itself changes after that write lands.
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
 
@@ -121,6 +125,7 @@ export async function GET(req: Request) {
     let life_events_added = 0;
     let google_wins = 0;
     let tom_wins = 0;
+    let email_collisions = 0;
 
     for (const person of contacts) {
       const resourceName = person.resourceName;
@@ -218,73 +223,43 @@ const allPhones = person.phoneNumbers?.map((p: any) => p.value).filter(Boolean) 
       )?.updateTime || null;
       const googleCreatedAt = googleUpdatedAt;
 
-      const { data: existing } = await supabase
-        .from("tom_contacts")
-        .select("id, created_at, full_name, email, phone, company, job_title, notes, home_address, birthday, tom_ai_updated_at, google_resource_name")
-        .eq("user_id", userId)
-        .eq("google_resource_name", resourceName)
-        .maybeSingle();
+      const phonesArray = person.phoneNumbers?.map((p: any) => ({
+        number: fmtPhone(p.value),
+        type: p.type === "mobile" ? "cell" : p.type === "work" ? "work" : "home",
+        primary: false,
+      })) || [];
+      if (phonesArray.length > 0) phonesArray[0].primary = true;
+
+      const incoming = {
+        full_name: fullName,
+        email: normalizeEmail(allEmails[0] || googleEmail),
+        phone: phonesArray[0]?.number || (googlePhone ? fmtPhone(googlePhone) : null),
+        company: googleCompany,
+        job_title: googleJobTitle,
+        home_address: googleAddress,
+        birthday,
+      };
+
+      const { data: existing } = await loadContactByResource(supabase, userId, resourceName);
 
       let contactId: string = "";
       if (existing) {
-        const tomUpdatedAt = existing.tom_ai_updated_at ? new Date(existing.tom_ai_updated_at) : null;
-        const googleUpdatedDate = googleUpdatedAt ? new Date(googleUpdatedAt) : null;
-        const googleShouldWin = googleUpdatedDate && (!tomUpdatedAt || googleUpdatedDate > tomUpdatedAt);
-
-        if (googleShouldWin) {
-          // Build phones array from all Google phones
-          const phonesArray = person.phoneNumbers?.map((p: any) => ({
-            number: fmtPhone(p.value),
-            type: p.type === "mobile" ? "cell" : p.type === "work" ? "work" : "home",
-            primary: false,
-          })) || [];
-          if (phonesArray.length > 0) phonesArray[0].primary = true;
-
-          const updates: any = {
-            last_synced_at: new Date().toISOString(),
-            ...(allEmails.length > 0 && {
-              all_emails: allEmails,
-              email: allEmails[0],
-            }),
-            ...(phonesArray.length > 0 && {
-              phones: phonesArray,
-              all_phones: allPhones,
-              phone: phonesArray[0]?.number || null,
-            }),
-            ...(googleCompany && { company: googleCompany }),
-            ...(googleJobTitle && { job_title: googleJobTitle }),
-            ...(googleAddress && { home_address: googleAddress }),
-            ...(birthday && { birthday }),
-            ...(fullName && { full_name: fullName }),
-          };
-          await supabase.from("tom_contacts").update(updates).eq("id", existing.id).eq("user_id", userId);
-          google_wins++;
-        } else {
-          // Humble Hello wins — push our data back to Google, still sync arrays
-          tom_wins++;
-          const updates: any = {
-            last_synced_at: new Date().toISOString(),
-            ...(allEmails.length > 0 && { all_emails: allEmails }),
-            ...(allPhones.length > 0 && { all_phones: allPhones }),
-          };
-          await supabase.from("tom_contacts").update(updates).eq("id", existing.id).eq("user_id", userId);
-          try {
-            await updateGoogleContact(accessToken, resourceName, {
-              full_name: existing.full_name,
-              email: existing.email,
-              phone: existing.phone,
-              company: existing.company,
-              job_title: existing.job_title,
-              notes: existing.notes,
-              address: existing.home_address,
-              birthday: existing.birthday,
-            });
-          } catch (e) {
-            console.error("Push to Google failed:", e);
-          }
-        }
-
-        contactId = existing.id;
+        const applied = await applyGoogleToExisting(
+          supabase,
+          userId,
+          accessToken,
+          existing,
+          resourceName,
+          incoming,
+          allEmails,
+          allPhones,
+          phonesArray,
+          googleUpdatedAt
+        );
+        contactId = applied.contactId || "";
+        google_wins += applied.fromGoogle;
+        tom_wins += applied.kept;
+        if (applied.collision) email_collisions++;
       } else {
           const fixedName = fixReversedName(fullName, givenName, familyName);
 
@@ -295,53 +270,53 @@ const allPhones = person.phoneNumbers?.map((p: any) => p.value).filter(Boolean) 
             if (guard !== "allow") continue;
           }
 
-          // Check if contact already exists by email before inserting
-          let existingByEmail = null;
-          if (googleEmail) {
-          const { data: emailMatch } = await supabase
-            .from("tom_contacts")
-            .select("id, google_resource_name")
-            .eq("user_id", userId)
-            .ilike("email", googleEmail)
-            .maybeSingle();
-          existingByEmail = emailMatch;
-        }
+          const owners = googleEmail ? await findContactsWithEmail(supabase, userId, googleEmail) : [];
+          const emailDecision = emailAssignmentDecision({
+            incomingEmail: googleEmail,
+            incomingName: fixedName,
+            incomingResource: resourceName,
+            owners,
+          });
 
-        if (existingByEmail) {
-          await supabase
-            .from("tom_contacts")
-            .update({
-              google_resource_name: resourceName,
-              last_synced_at: new Date().toISOString(),
-              ...(googlePhone && { phone: fmtPhone(googlePhone) }),
-              ...(googleCompany && { company: googleCompany }),
-              ...(googleJobTitle && { job_title: googleJobTitle }),
-            })
-            .eq("id", existingByEmail.id)
-            .eq("user_id", userId);
-          contactId = existingByEmail.id;
-          google_wins++;
-        } else {
-          // Determine if this was manually created in Google
-          // A contact is "manual" if it has a name but came from Google directly
-          // (as opposed to being scanned from email signatures or calendar)
+          if (emailDecision === "reject") {
+            // This address already belongs to a different person. Do not attach it
+            // here and do not create a second contact with the same email.
+            email_collisions++;
+            console.warn(`Skipped Google contact ${fixedName}: email already belongs to someone else`);
+            continue;
+          }
+
+          if (emailDecision === "same_person" && owners[0]) {
+            const { data: linked } = await loadContactById(supabase, userId, owners[0].id);
+            if (linked && !linked.google_resource_name) {
+              const applied = await applyGoogleToExisting(
+                supabase,
+                userId,
+                accessToken,
+                linked,
+                resourceName,
+                { ...incoming, full_name: linked.full_name || fixedName },
+                allEmails,
+                allPhones,
+                phonesArray,
+                googleUpdatedAt
+              );
+              contactId = applied.contactId || "";
+              google_wins += applied.fromGoogle;
+              tom_wins += applied.kept;
+            } else if (linked?.google_resource_name && linked.google_resource_name !== resourceName) {
+              email_collisions++;
+            } else if (linked) {
+              contactId = linked.id;
+            }
+          } else {
+          // A contact is "manual" if it has a name and a phone or email from Google.
           const isManualContact = !!fixedName && (googlePhone || googleEmail);
 
           if (isManualContact) {
-            // Auto-import directly — user manually created this, trust it
-            const phonesArray = person.phoneNumbers?.map((p: any) => ({
-              number: fmtPhone(p.value),
-              type: p.type === "mobile" ? "cell" : p.type === "work" ? "work" : "home",
-              primary: false,
-            })) || [];
-            if (phonesArray.length > 0) phonesArray[0].primary = true;
-
-            const { data: newContact } = await supabase
-              .from("tom_contacts")
-              .insert({
-                user_id: userId,
+            const created = await createFromGoogle(supabase, userId, resourceName, {
                 full_name: fixedName,
-                email: googleEmail || null,
+                email: normalizeEmail(googleEmail),
                 all_emails: allEmails.length > 0 ? allEmails : (googleEmail ? [googleEmail] : []),
                 phone: googlePhone ? fmtPhone(googlePhone) : null,
                 phones: phonesArray,
@@ -351,19 +326,15 @@ const allPhones = person.phoneNumbers?.map((p: any) => p.value).filter(Boolean) 
                 home_address: googleAddress || null,
                 notes: googleBio || null,
                 birthday: birthday || null,
-                google_resource_name: resourceName,
                 last_synced_at: new Date().toISOString(),
-                // High confidence since manually created
                 relationship_strength: 65,
                 relationship_health: "warm",
                 manually_created: true,
                 tier_override: false,
-              })
-              .select("id")
-              .single();
+              });
 
-            if (newContact) {
-              contactId = newContact.id;
+            if (created.contactId) {
+              contactId = created.contactId;
               synced++;
               console.log(`Auto-imported manual Google contact: ${fixedName}`);
             }
@@ -452,6 +423,7 @@ const allPhones = person.phoneNumbers?.map((p: any) => p.value).filter(Boolean) 
       life_events_added,
       google_wins,
       tom_wins,
+      email_collisions,
       nextPageToken,
       has_more: !!nextPageToken,
       sync_token_saved: !!(newSyncToken && !nextPageToken),

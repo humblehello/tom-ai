@@ -3,6 +3,8 @@ import { createClient } from "@supabase/supabase-js";
 import { getValidAccessToken, getHumbleHelloAccessToken } from "./google";
 import { scoreAllContacts } from "./relationship-scorer";
 import { createClickTrackingUrl } from "./campaign-tracking";
+import { emailAssignmentDecision, fillBlankFields } from "./contactFieldPolicy";
+import { findContactsWithEmail, insertContact, selectContacts, updateContact } from "./contactWrite";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -243,7 +245,9 @@ export const contactsScore = inngest.createFunction(
     const userId = event.data.userId as string;
     await step.run("score", async () => { await scoreAllContacts(userId); return { ok: true }; });
     await step.run("clean", async () => { await supabase.rpc("auto_clean_contacts", { p_user_id: userId }); return { ok: true }; });
-    await step.run("merge", async () => { await supabase.rpc("merge_duplicate_contacts", { p_user_id: userId }); return { ok: true }; });
+    // Disabled with the other auto-merge. This RPC was still running every hour
+    // and can combine two people who are not the same person. Merge stays on the review screen.
+    // await step.run("merge", async () => { await supabase.rpc("merge_duplicate_contacts", { p_user_id: userId }); return { ok: true }; });
     // DISABLED 2026-05-10 per Tom: auto-merge is causing problems, review queue only
 // await step.run("auto-merge", async () => {
 //   const res = await fetch(`${APP_URL}/api/contacts/auto-merge`, {
@@ -822,21 +826,28 @@ async function saveContactDirect(contact: any, userId: string): Promise<"importe
   if (!contact.full_name?.trim()) return "skipped";
   try {
     if (contact.email) {
-      const { data: existing } = await supabase
-        .from("tom_contacts")
-        .select("id, phone, company, job_title, birthday, home_address")
-        .eq("user_id", userId)
-        .ilike("email", contact.email.trim())
-        .maybeSingle();
-      if (existing) {
-        const patch: any = {};
-        if (!existing.phone && contact.phone) patch.phone = contact.phone;
-        if (!existing.company && contact.company) patch.company = contact.company;
-        if (!existing.job_title && contact.job_title) patch.job_title = contact.job_title;
-        if (!existing.birthday && contact.birthday) patch.birthday = contact.birthday;
-        if (!existing.home_address && contact.home_address) patch.home_address = contact.home_address;
+      const owners = await findContactsWithEmail(supabase, userId, contact.email.trim());
+      const decision = emailAssignmentDecision({
+        incomingEmail: contact.email,
+        incomingName: contact.full_name,
+        owners,
+      });
+      if (decision === "reject") return "skipped";
+      if (decision === "same_person" && owners[0]) {
+        const { data: existing } = await selectContacts(
+          supabase,
+          "id, phone, company, job_title, birthday, home_address",
+          (query) => query.eq("user_id", userId).eq("id", owners[0].id).maybeSingle()
+        );
+        if (!existing) return "skipped";
+        const patch = fillBlankFields(
+          existing,
+          contact,
+          ["phone", "company", "job_title", "birthday", "home_address"],
+          "human"
+        );
         if (Object.keys(patch).length > 0) {
-          await supabase.from("tom_contacts").update(patch).eq("id", existing.id).eq("user_id", userId);
+          await updateContact(supabase, existing.id, userId, patch);
           return "imported";
         }
         return "skipped";
@@ -850,7 +861,7 @@ async function saveContactDirect(contact: any, userId: string): Promise<"importe
         .maybeSingle();
       if (existing) return "skipped";
     }
-    const { error } = await supabase.from("tom_contacts").insert({
+    const insertedRow = {
       user_id: userId,
       full_name: contact.full_name.trim(),
       email: contact.email?.toLowerCase().trim() || null,
@@ -861,6 +872,15 @@ async function saveContactDirect(contact: any, userId: string): Promise<"importe
       birthday: contact.birthday || null,
       home_address: contact.home_address || null,
       last_synced_at: new Date().toISOString(),
+    };
+    const { error } = await insertContact(supabase, {
+      ...insertedRow,
+      field_provenance: fillBlankFields(
+        null,
+        insertedRow,
+        ["full_name", "email", "phone", "company", "job_title", "notes", "birthday", "home_address"],
+        "human"
+      ).field_provenance,
     });
     if (error) return "error";
     return "imported";

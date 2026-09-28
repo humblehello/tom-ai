@@ -5,6 +5,8 @@ import { getValidAccessToken } from "../../../lib/google";
 import { createGoogleContact } from "../../../lib/googleContacts";
 import { contactImportGuard } from "../../../lib/contactGuard";
 import { isBlockedEmail } from "@/app/lib/contact-blocklist";
+import { fillBlankFields } from "../../../lib/contactFieldPolicy";
+import { emailTakenBySomeoneElse, insertContact, selectContacts, updateContact } from "../../../lib/contactWrite";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -102,14 +104,17 @@ async function processSignatures(userId: string, batchSize: number) {
 
   // Pick contacts with emails, not yet signature-scanned, prioritize by email count
   const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-  const { data: contacts } = await supabase
-    .from("tom_contacts")
-    .select("id, email, phone, job_title, company, linkedin_url, twitter_url")
-    .eq("user_id", userId)
-    .not("email", "is", null)
-    .or(`signature_scanned_at.is.null,signature_scanned_at.lt.${sevenDaysAgo}`)
-    .order("email_count", { ascending: false })
-    .limit(batchSize);
+  const { data: contacts } = await selectContacts(
+    supabase,
+    "id, email, phone, job_title, company, linkedin_url, twitter_url",
+    (query) =>
+      query
+        .eq("user_id", userId)
+        .not("email", "is", null)
+        .or(`signature_scanned_at.is.null,signature_scanned_at.lt.${sevenDaysAgo}`)
+        .order("email_count", { ascending: false })
+        .limit(batchSize)
+  );
 
   let updated = 0;
   for (const contact of contacts || []) {
@@ -140,11 +145,16 @@ async function processSignatures(userId: string, batchSize: number) {
       }
 
       const parsed = parseSignatureData(bestSig, contact);
-      const updatePayload: any = { signature_scanned_at: new Date().toISOString() };
-      if (Object.keys(parsed).length > 0) Object.assign(updatePayload, parsed);
+      const filled = fillBlankFields(
+        contact,
+        parsed,
+        ["phone", "linkedin_url", "twitter_url", "job_title", "company"],
+        "scrape"
+      );
+      const updatePayload: any = { signature_scanned_at: new Date().toISOString(), ...filled };
 
-      await supabase.from("tom_contacts").update(updatePayload).eq("id", contact.id).eq("user_id", userId);
-      if (Object.keys(parsed).length > 0) updated++;
+      await updateContact(supabase, contact.id, userId, updatePayload);
+      if (Object.keys(filled).some((key) => key !== "field_provenance")) updated++;
 
       await new Promise(r => setTimeout(r, 200));
     } catch (e) {
@@ -201,14 +211,9 @@ async function createContactsFromInbox(userId: string, accessToken: string) {
       const nameMatch = fromHeader.match(/^"?([^"<]+)"?\s*</);
       const fullName = nameMatch ? nameMatch[1].trim() : email.split("@")[0];
 
-  // Check if contact already exists
-      const { data: existing } = await supabase
-        .from("tom_contacts")
-        .select("id")
-        .eq("user_id", userId)
-        .ilike("email", email)
-        .maybeSingle();
-      if (existing) continue;
+      // One email, one person. A failed maybeSingle (already duplicated) must not create another.
+      const emailDecision = await emailTakenBySomeoneElse(supabase, userId, email, null, fullName);
+      if (emailDecision !== "allow") continue;
 
       // Run blocklist + deleted guard
       const guard = await contactImportGuard(userId, email, fullName, "inbox_scan", { from: fromHeader });
@@ -225,21 +230,30 @@ async function createContactsFromInbox(userId: string, accessToken: string) {
       const sigData = parseSignatureData(sig, {});
 
       // Create the contact
-      const { data: newContact } = await supabase
-        .from("tom_contacts")
-        .insert({
+      const scrapedRow = {
+        full_name: sigData.full_name || fullName,
+        email: email,
+        phone: sigData.phone || null,
+        job_title: sigData.job_title || null,
+        company: sigData.company || null,
+        linkedin_url: sigData.linkedin_url || null,
+      };
+      const { data: newContact } = await insertContact(
+        supabase,
+        {
           user_id: userId,
-          full_name: sigData.full_name || fullName,
-          email: email,
-          phone: sigData.phone || null,
-          job_title: sigData.job_title || null,
-          company: sigData.company || null,
-          linkedin_url: sigData.linkedin_url || null,
+          ...scrapedRow,
           signature_scanned_at: new Date().toISOString(),
           last_synced_at: new Date().toISOString(),
-        })
-        .select()
-        .single();
+          field_provenance: fillBlankFields(
+            null,
+            scrapedRow,
+            ["full_name", "email", "phone", "job_title", "company", "linkedin_url"],
+            "scrape"
+          ).field_provenance,
+        },
+        { returning: true }
+      );
 
       if (newContact) {
         // Also create in Google Contacts

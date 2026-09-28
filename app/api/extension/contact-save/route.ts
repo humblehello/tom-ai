@@ -3,6 +3,7 @@ import { createClient } from "@supabase/supabase-js";
 import Anthropic from "@anthropic-ai/sdk";
 import { getValidAccessToken } from "../../../lib/google";
 import { createGoogleContact, updateGoogleContact } from "../../../lib/googleContacts";
+import { keepFilledIdentity, emailTakenBySomeoneElse } from "../../../lib/contactWrite";
 
 export const maxDuration = 60;
 
@@ -679,7 +680,7 @@ export async function POST(req: NextRequest) {
     const baseUpdates: any = {};
     const changedFields: string[] = [];
 
-    // Auto-overwrite fields
+    // LinkedIn enrichment fills blanks on an existing person. A new contact can take these values.
     if (latestRole?.company) {
       baseUpdates.company = latestRole.company;
       if (existing?.company !== latestRole.company) changedFields.push("company");
@@ -714,6 +715,7 @@ export async function POST(req: NextRequest) {
     }
 
     // Email — append-only logic
+    let emailBlocked = false;
     if (email) {
       const existingEmails = [
         existing?.email,
@@ -724,7 +726,11 @@ export async function POST(req: NextRequest) {
         .filter(Boolean)
         .map((e: string) => e.toLowerCase().trim());
 
-      if (!existingEmails.includes(email)) {
+      const emailDecision = existing
+        ? await emailTakenBySomeoneElse(supabase, userId, email, existing.id, existing.full_name)
+        : await emailTakenBySomeoneElse(supabase, userId, email, null, fullName);
+      if (!existing && emailDecision !== "allow") emailBlocked = true;
+      if (!existingEmails.includes(email) && emailDecision === "allow") {
         if (!existing?.personal_email) {
           baseUpdates.personal_email = email;
           changedFields.push("personal_email");
@@ -889,9 +895,20 @@ export async function POST(req: NextRequest) {
       baseUpdates.relationship_index = analysis;
     }
 
-    // Timestamps
+    if (existing) {
+      const protectedFields = ["company", "job_title", "title", "linkedin_url", "seniority", "city", "birthday", "phone"];
+      keepFilledIdentity(existing, baseUpdates, protectedFields);
+      for (const field of protectedFields) {
+        if (!Object.prototype.hasOwnProperty.call(baseUpdates, field)) {
+          const idx = changedFields.indexOf(field);
+          if (idx >= 0) changedFields.splice(idx, 1);
+        }
+      }
+    }
+
+    // tom_ai_updated_at is only for a person's edit. Enrichment must not set it,
+    // or the next Google sync treats LinkedIn data as something the person typed.
     baseUpdates.last_synced_at = now;
-    baseUpdates.tom_ai_updated_at = now;
 
     // ── 5. Insert or update ──
     let savedContact: any;
@@ -914,6 +931,11 @@ export async function POST(req: NextRequest) {
         );
       }
       savedContact = updated;
+    } else if (emailBlocked) {
+      return NextResponse.json(
+        { error: "email_taken", message: "That email already belongs to another person." },
+        { status: 409, headers: CORS_HEADERS }
+      );
     } else {
       const insertPayload: any = {
         user_id: userId,

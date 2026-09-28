@@ -83,10 +83,14 @@ export async function updateGoogleContact(
       body.phoneNumbers = [];
       personFields.push("phoneNumbers");
     } else if (updates.phone) {
+      // Make this the primary number. Appending left the old number first, and the
+      // next Google pull copied that old number back over the edit.
       const existing = current.phoneNumbers || [];
-      const alreadyHas = existing.some((p: any) => p.value === updates.phone);
-      if (!alreadyHas) {
-        body.phoneNumbers = [...existing, { value: updates.phone, type: "mobile" }];
+      const target = updates.phone.trim();
+      const alreadyPrimary = (existing[0]?.value || "").trim() === target;
+      if (!alreadyPrimary) {
+        const rest = existing.filter((p: any) => (p.value || "").trim() !== target);
+        body.phoneNumbers = [{ value: target, type: "mobile" }, ...rest];
         personFields.push("phoneNumbers");
       }
     }
@@ -259,12 +263,16 @@ export async function updateGoogleContact(
         `updateGoogleContact: refusing to delete email for ${resourceName} — email is the primary contact key and cannot be removed via this path. Use deleteGoogleContact to remove the entire contact.`
       );
     } else if (updates.email) {
+      // Make this the primary address. Appending kept the old address first, so the
+      // next pull restored it and the correction looked lost.
       const existing = current.emailAddresses || [];
-      const alreadyHas = existing.some(
-        (e: any) => e.value?.toLowerCase() === updates.email?.toLowerCase()
-      );
-      if (!alreadyHas) {
-        body.emailAddresses = [...existing, { value: updates.email, type: "work" }];
+      const target = updates.email.trim();
+      const alreadyPrimary = (existing[0]?.value || "").trim().toLowerCase() === target.toLowerCase();
+      if (!alreadyPrimary) {
+        const rest = existing.filter(
+          (e: any) => (e.value || "").trim().toLowerCase() !== target.toLowerCase()
+        );
+        body.emailAddresses = [{ value: target, type: "work" }, ...rest];
         personFields.push("emailAddresses");
       }
     }

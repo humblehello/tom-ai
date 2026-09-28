@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createClient } from "@supabase/supabase-js";
+import { fillBlankFields } from "../../../lib/contactFieldPolicy";
+import { emailTakenBySomeoneElse, insertContact, selectContacts, updateContact, withHumanStamp } from "../../../lib/contactWrite";
 export const maxDuration = 60;
 
 const supabase = createClient(
@@ -190,36 +192,71 @@ Respond ONLY with JSON:
       if (!contact.email && !contact.full_name) { skipped++; continue; }
 
       let existing = null;
+      let matchedBy: "email" | "name" | null = null;
 
       if (contact.email) {
-        const { data } = await supabase
-          .from("tom_contacts")
-          .select("id, import_attributes")
-          .eq("user_id", userId)
-          .eq("email", contact.email)
-          .maybeSingle();
-        existing = data;
+        const { data } = await selectContacts(
+          supabase,
+          "id, import_attributes, email, phone, company, job_title, notes, home_address, full_name",
+          (query) => query.eq("user_id", userId).ilike("email", contact.email).limit(2)
+        );
+        if ((data || []).length === 1) {
+          existing = data[0];
+          matchedBy = "email";
+        } else if ((data || []).length > 1) {
+          skipped++;
+          continue;
+        }
       }
 
       if (!existing && contact.full_name) {
-        const { data } = await supabase
-          .from("tom_contacts")
-          .select("id, import_attributes")
-          .eq("user_id", userId)
-          .ilike("full_name", contact.full_name)
-          .maybeSingle();
-        existing = data;
+        const { data } = await selectContacts(
+          supabase,
+          "id, import_attributes, email, phone, company, job_title, notes, home_address, full_name",
+          (query) => query.eq("user_id", userId).ilike("full_name", contact.full_name).limit(2)
+        );
+        if ((data || []).length === 1) {
+          existing = data[0];
+          matchedBy = "name";
+        }
+      }
+
+      const importAttributes = {
+        ...(existing?.import_attributes || {}),
+        ...(contact.custom_fields || {}),
+        last_imported_at: new Date().toISOString(),
+        import_source: file.name,
+      };
+
+      if (existing && matchedBy === "name") {
+        const patch = fillBlankFields(
+          existing,
+          {
+            phone: contact.phone,
+            company: contact.company,
+            job_title: contact.job_title,
+            notes: contact.notes,
+            home_address: contact.address ? { formatted: contact.address } : null,
+            email: !existing.email ? contact.email : null,
+          },
+          ["phone", "company", "job_title", "notes", "home_address", "email"],
+          "human"
+        );
+        if (patch.email) {
+          const decision = await emailTakenBySomeoneElse(supabase, userId, patch.email, existing.id, existing.full_name);
+          if (decision === "reject") delete patch.email;
+        }
+        patch.import_attributes = importAttributes;
+        patch.last_synced_at = new Date().toISOString();
+        await updateContact(supabase, existing.id, userId, patch);
+        updated++;
+        continue;
       }
 
       const contactData: any = {
         user_id: userId,
         last_synced_at: new Date().toISOString(),
-        import_attributes: {
-          ...(existing?.import_attributes || {}),
-          ...(contact.custom_fields || {}),
-          last_imported_at: new Date().toISOString(),
-          import_source: file.name,
-        },
+        import_attributes: importAttributes,
       };
 
       if (contact.full_name) contactData.full_name = contact.full_name;
@@ -230,11 +267,22 @@ Respond ONLY with JSON:
       if (contact.notes) contactData.notes = contact.notes;
       if (contact.address) contactData.home_address = { formatted: contact.address };
 
+      if (contactData.email) {
+        const decision = await emailTakenBySomeoneElse(
+          supabase, userId, contactData.email, existing?.id, contactData.full_name
+        );
+        if (decision === "reject") {
+          skipped++;
+          continue;
+        }
+      }
+
+      const stamped = withHumanStamp(existing?.field_provenance, contactData);
       if (existing) {
-        await supabase.from("tom_contacts").update(contactData).eq("id", existing.id);
+        await updateContact(supabase, existing.id, userId, stamped);
         updated++;
       } else {
-        await supabase.from("tom_contacts").insert(contactData);
+        await insertContact(supabase, stamped);
         created++;
       }
     }

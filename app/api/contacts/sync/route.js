@@ -104,12 +104,14 @@ let accessToken = user.access_token;
         };
       });
 
-    // Upsert into Supabase
+    // Legacy full-sync path. Do not update rows that already exist — that
+    // overwrite put Google's copy over edits. New rows still insert.
+    // Ongoing sync belongs in /api/contacts/google-sync, which is field-aware.
     const { error: upsertError } = await supabase
       .from('tom_contacts')
       .upsert(rows, {
         onConflict: 'user_id,google_contact_id',
-        ignoreDuplicates: false
+        ignoreDuplicates: true
       });
 
     if (upsertError) throw upsertError;

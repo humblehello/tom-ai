@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import { getValidAccessToken } from "../../../lib/google";
 import { createGoogleContact } from "../../../lib/googleContacts";
+import { emailTakenBySomeoneElse } from "../../../lib/contactWrite";
 
 export const maxDuration = 30;
 
@@ -254,6 +255,18 @@ export async function POST(req: NextRequest) {
         },
         { headers: CORS_HEADERS }
       );
+    }
+
+    if (email) {
+      const emailDecision = await emailTakenBySomeoneElse(
+        supabase, userId, email, null, full_name.trim()
+      );
+      if (emailDecision !== "allow") {
+        return NextResponse.json(
+          { error: "email_taken", message: "That email already belongs to another person." },
+          { status: 409, headers: CORS_HEADERS }
+        );
+      }
     }
 
     // ── 4. Build new contact payload ──
