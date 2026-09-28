@@ -109,6 +109,26 @@ export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => ({}));
   const { contactIds, draftOnly = false, batch_size } = body;
 
+  // Respect user's verification pause setting — skip auto sends but allow manual drafts
+  if (!draftOnly && !contactIds?.length) {
+    const { data: userSettings } = await supabase
+      .from("user_settings")
+      .select("verification_sends_paused")
+      .eq("user_id", userId)
+      .maybeSingle();
+
+    if (userSettings?.verification_sends_paused === true) {
+      return NextResponse.json({
+        success: true,
+        sent: 0,
+        drafted: 0,
+        skipped: 0,
+        message: "Verification sends are paused. Turn this back on in Settings → Engage when you're ready.",
+        paused: true,
+      });
+    }
+  }
+
   const { data: user } = await supabase
     .from("tom_users")
     .select("name, email")

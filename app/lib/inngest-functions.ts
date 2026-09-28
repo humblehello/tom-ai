@@ -2583,6 +2583,20 @@ export const verificationsSend = inngest.createFunction(
   async ({ event, step }: any) => {
     const userId = event.data.userId as string;
 
+    // Check user's pause setting BEFORE anything else
+    const paused = await step.run("check-paused", async () => {
+      const { data } = await supabase
+        .from("user_settings")
+        .select("verification_sends_paused")
+        .eq("user_id", userId)
+        .maybeSingle();
+      return data?.verification_sends_paused === true;
+    });
+
+    if (paused) {
+      return { skipped: "verification_sends_paused_by_user", userId };
+    }
+
     const nowET = new Date(new Date().toLocaleString("en-US", { timeZone: "America/New_York" }));
     const hourET = nowET.getHours();
     if (hourET < 9 || hourET >= 16) {

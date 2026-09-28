@@ -1,13 +1,9 @@
+"use client";
 import Link from "next/link";
 import Image from "next/image";
 import { AuthModalProvider, AuthTrigger } from "./components/AuthModal";
 import { FeaturesDropdown } from "./components/FeaturesDropdown";
-
-export const metadata = {
-  title: "Humble Hello — Clean your contacts. Then actually use them.",
-  description:
-    "A relationship platform for the people you actually want to keep. Keep your contact list current, stay in touch, and send real handwritten cards at the right moment.",
-};
+import { BetaNote, WaitlistProvider, useWaitlist } from "./components/WaitlistButton";
 
 const M = {
   paper: "#faf6ef",
@@ -43,16 +39,56 @@ export default function HomePage() {
 
       <div style={{ background: M.paper, color: M.ink, fontFamily: BODY, minHeight: "100vh" }}>
         <AuthModalProvider>
-          <Nav />
-          <Hero />
-          <TrustStrip />
-          <FeatureCards />
-          <LifestyleBreak />
-          <FinalCta />
-          <Footer />
+          <WaitlistProvider>
+            <Nav />
+            <Hero />
+            <TrustStrip />
+            <FeatureCards />
+            <LifestyleBreak />
+            <FinalCta />
+            <Footer />
+          </WaitlistProvider>
         </AuthModalProvider>
       </div>
     </>
+  );
+}
+
+function FinalCtaButton() {
+  const { openWaitlist } = useWaitlist();
+  return (
+    <button onClick={openWaitlist} style={{
+      display: "inline-block",
+      background: M.green, color: "#fff",
+      padding: "16px 36px", borderRadius: 12,
+      fontFamily: BODY, fontSize: 16, fontWeight: 600,
+      border: "none", cursor: "pointer",
+      boxShadow: "0 8px 24px -8px rgba(47, 122, 58, 0.4)",
+    }}>
+      Join the beta →
+    </button>
+  );
+}
+
+function FinalCtaInlineLink() {
+  const { openWaitlist } = useWaitlist();
+  return (
+    <button
+      onClick={openWaitlist}
+      style={{
+        color: M.fire,
+        fontWeight: 700,
+        background: "none",
+        border: "none",
+        padding: 0,
+        cursor: "pointer",
+        fontFamily: "inherit",
+        fontSize: "inherit",
+        textDecoration: "underline",
+      }}
+    >
+      Click here to claim a spot →
+    </button>
   );
 }
 
@@ -82,7 +118,7 @@ function Nav() {
           <Link href="/plans" style={navLink}>Plans</Link>
           <span style={{ width: 1, height: 16, background: M.rule }} aria-hidden />
           <AuthTrigger mode="signin" style={navSignIn}>Sign in</AuthTrigger>
-          <AuthTrigger mode="signup" style={navCta}>Try for free →</AuthTrigger>
+     <WaitlistCta />
         </div>
       </div>
     </nav>
@@ -104,7 +140,14 @@ const navCta: React.CSSProperties = {
   textDecoration: "none", padding: "9px 18px", borderRadius: 8,
   background: M.green, letterSpacing: "0.01em",
 };
-
+function WaitlistCta() {
+  const { openWaitlist } = useWaitlist();
+  return (
+    <button onClick={openWaitlist} style={{ ...navCta, border: "none", cursor: "pointer" }}>
+      Try for free →
+    </button>
+  );
+}
 // ── Hero ────────────────────────────────────────────────────────────────────
 function Hero() {
   return (
@@ -136,7 +179,7 @@ function Hero() {
               Clean your contacts.
               <br />
               <span style={{ fontStyle: "italic", color: M.fire }}>
-                Then actually use them.
+                Then let AI help you use them.
               </span>
             </h1>
 
@@ -145,7 +188,7 @@ function Hero() {
               marginTop: 28, maxWidth: 540,
             }}>
               Humble Hello keeps your contact list current and helps you stay in touch with the people in
-              it — whether they're customers, candidates, mentors, or friends.
+              it — whether they're customers, vendors, voters, or friends.
             </p>
 
             <div style={{ marginTop: 36, display: "flex", flexWrap: "wrap", alignItems: "center", gap: 12 }}>
@@ -166,6 +209,10 @@ function Hero() {
               <span style={{ display: "inline-flex", alignItems: "center", gap: 7 }}>
                 <Check /> Connect in 30 seconds
               </span>
+            </div>
+
+            <div style={{ marginTop: 24 }}>
+              <BetaNote />
             </div>
           </div>
 
@@ -429,17 +476,15 @@ function FinalCta() {
           Free forever for the basics. Pro $25/mo. Growth $49/mo when you're ready for sequences.
         </p>
         <div style={{ marginTop: 36 }}>
-          <AuthTrigger mode="signup" style={{
-            display: "inline-block",
-            background: M.green, color: "#fff",
-            padding: "16px 36px", borderRadius: 12,
-            fontFamily: BODY, fontSize: 16, fontWeight: 600,
-            border: "none", cursor: "pointer",
-            boxShadow: "0 8px 24px -8px rgba(47, 122, 58, 0.4)",
-          }}>
-            Try for free →
-          </AuthTrigger>
+          <FinalCtaButton />
         </div>
+        <p style={{
+          fontFamily: BODY, fontSize: 15, fontWeight: 600, color: M.ink,
+          marginTop: 24, lineHeight: 1.5,
+        }}>
+          Currently in Beta. We're letting in 50 new users a week.{" "}
+          <FinalCtaInlineLink />
+        </p>
       </div>
     </section>
   );
@@ -489,8 +534,8 @@ const sectionH2: React.CSSProperties = {
 };
 
 function ProviderButton({ provider }: { provider: "google" | "microsoft" }) {
+  const { openWaitlist } = useWaitlist();
   const isGoogle = provider === "google";
-  const href = isGoogle ? "/api/auth/google" : "/api/auth/microsoft";
   const style: React.CSSProperties = {
     display: "inline-flex",
     alignItems: "center",
@@ -506,12 +551,13 @@ function ProviderButton({ provider }: { provider: "google" | "microsoft" }) {
     textDecoration: "none",
     boxShadow: "0 1px 0 rgba(26, 18, 8, 0.04)",
     transition: "all 0.15s ease",
+    cursor: "pointer",
   };
   return (
-    <a href={href} className="hh-provider-btn" style={style}>
+    <button onClick={openWaitlist} className="hh-provider-btn" style={style}>
       {isGoogle ? <GoogleIcon /> : <MicrosoftIcon />}
       Continue with {isGoogle ? "Google" : "Microsoft"}
-    </a>
+    </button>
   );
 }
 

@@ -109,6 +109,7 @@ const [cardTriggers, setCardTriggers] = useState<string[]>(["birthday"]);
 const [cardBudgetCents, setCardBudgetCents] = useState(2500);     // $25 default
 const [giftBudgetCents, setGiftBudgetCents] = useState(5000);     // $50 default
   const [suppressNoEmail, setSuppressNoEmail] = useState(true);
+  const [verificationSendsPaused, setVerificationSendsPaused] = useState(false);
   const [networkOptIn, setNetworkOptIn] = useState(false);
   const [cardPurchaseThreshold, setCardPurchaseThreshold] = useState(500);
   const [giftPurchaseThreshold, setGiftPurchaseThreshold] = useState(10000);
@@ -145,6 +146,7 @@ const [giftBudgetCents, setGiftBudgetCents] = useState(5000);     // $50 default
         setGiftPurchaseThreshold(settings.gift_purchase_threshold ?? 10000);
         setPurchaseCardAutoSend(settings.purchase_card_auto_send ?? false);
         setPurchaseGiftAutoSend(settings.purchase_gift_auto_send ?? false);
+        setVerificationSendsPaused(settings.verification_sends_paused ?? false);
       }
       if (plan) setPlanData(plan);
       if (me) {
@@ -181,52 +183,58 @@ const [giftBudgetCents, setGiftBudgetCents] = useState(5000);     // $50 default
   }, []);
 
   const handleSave = async () => {
-  setSaving(true);
-  try {
-    // Fetch current card_profile to preserve locked defaults
-    // (gift_budget_cents, gift_style, purchase_thank_you_threshold_cents, etc.)
-    const meRes = await fetch("/api/auth/me");
-    const me = meRes.ok ? await meRes.json() : null;
-    const currentCardProfile = me?.card_profile || {};
+    setSaving(true);
+    try {
+      // Fetch current card_profile to preserve locked defaults
+      const meRes = await fetch("/api/auth/me");
+      const me = meRes.ok ? await meRes.json() : null;
+      const currentCardProfile = me?.card_profile || {};
 
-    await fetch("/api/settings", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        notify_email: notifyEmail,
-        notify_push: notifyPush,
-        auto_order_threshold: autoOrderThreshold,
-        approval_threshold: approvalThreshold,
-        gift_style: giftStyle,
-        snooze_days: snoozeDays,
-        network_opt_in: networkOptIn,
-        card_purchase_threshold: cardPurchaseThreshold,
-        gift_purchase_threshold: giftPurchaseThreshold,
-        purchase_card_auto_send: purchaseCardAutoSend,
-        purchase_gift_auto_send: purchaseGiftAutoSend,
-      }),
-    });
-    await fetch("/api/profile", {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({
-    card_profile: {
-      ...currentCardProfile,
-      signoff: cardSignoff,
-      tone: cardTone,
-      auto_send_thresholds: cardThresholds,
-      auto_send_enabled: cardAutoSend,
-      triggers: cardTriggers,
-      budget_cents: cardBudgetCents,
-      gift_budget_cents: giftBudgetCents,
-    },
-  }),
-});
-    setSaved(true);
-    setTimeout(() => setSaved(false), 3000);
-  } catch {}
-  setSaving(false);
-};
+      const settingsRes = await fetch("/api/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          notify_email: notifyEmail,
+          notify_push: notifyPush,
+          auto_order_threshold: autoOrderThreshold,
+          approval_threshold: approvalThreshold,
+          gift_style: giftStyle,
+          snooze_days: snoozeDays,
+          network_opt_in: networkOptIn,
+          card_purchase_threshold: cardPurchaseThreshold,
+          gift_purchase_threshold: giftPurchaseThreshold,
+          purchase_card_auto_send: purchaseCardAutoSend,
+          purchase_gift_auto_send: purchaseGiftAutoSend,
+          verification_sends_paused: verificationSendsPaused,
+        }),
+      });
+      if (!settingsRes.ok) throw new Error("settings save failed");
+
+      const profileRes = await fetch("/api/profile", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          card_profile: {
+            ...currentCardProfile,
+            signoff: cardSignoff,
+            tone: cardTone,
+            auto_send_thresholds: cardThresholds,
+            auto_send_enabled: cardAutoSend,
+            triggers: cardTriggers,
+            budget_cents: cardBudgetCents,
+            gift_budget_cents: giftBudgetCents,
+          },
+        }),
+      });
+      if (!profileRes.ok) throw new Error("profile save failed");
+
+      setSaved(true);
+      setTimeout(() => setSaved(false), 3000);
+    } catch {
+      alert("Couldn't save settings — please try again.");
+    }
+    setSaving(false);
+  };
 
   const handlePortal = async () => {
     setPortalLoading(true);
@@ -602,6 +610,19 @@ const [giftBudgetCents, setGiftBudgetCents] = useState(5000);     // $50 default
                 label="Suppress contacts with no recent email history"
                 desc="Hide contacts with no email activity in 10+ months unless they're a friend, family, or top tier"
               />
+              <div style={{ borderTop: `1px solid ${C.border}`, paddingTop: 16 }}>
+                <Toggle
+                  value={verificationSendsPaused}
+                  onChange={setVerificationSendsPaused}
+                  label="Pause auto contact verification sends"
+                  desc="When on, Humble Hello stops sending new verification emails. Already-queued sends still go out."
+                />
+                {verificationSendsPaused && (
+                  <div style={{ background: C.amberLight, border: `1px solid ${C.amber}44`, borderRadius: 10, padding: "12px 16px", fontSize: 12, color: C.amber, lineHeight: 1.6, marginTop: 8 }}>
+                    Verification sends are paused. Your contact list won't get cleaner until you turn this back on — but no new outbound emails will go to your contacts.
+                  </div>
+                )}
+              </div>
             </Card>
 
             <Card title="Autonomy & Gifts" subtitle="Define when Humble Hello acts automatically vs asks for approval">

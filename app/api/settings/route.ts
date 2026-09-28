@@ -20,6 +20,7 @@ const DEFAULTS = {
   dietary_restrictions: [],
   gift_style: "thoughtful",
   snooze_days: 5,
+  verification_sends_paused: false,
 };
 
 async function getUserId() {
@@ -78,6 +79,7 @@ export async function POST(req: Request) {
     "snooze_days", "network_opt_in",
     "card_purchase_threshold", "gift_purchase_threshold",
     "purchase_card_auto_send", "purchase_gift_auto_send",
+    "verification_sends_paused",
   ];
 
   const userSettingsUpdates: any = {};
