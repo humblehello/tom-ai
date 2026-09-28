@@ -264,44 +264,10 @@ function deepMerge(existing: any, incoming: any): any {
   return result;
 }
 
-async function syncTagsToGoogle(userId: string, contactId: string, tags: any[]) {
-  try {
-    const { data: contact } = await supabase
-      .from("tom_contacts")
-      .select("google_resource_name")
-      .eq("id", contactId)
-      .eq("user_id", userId)
-      .single();
-
-    if (!contact?.google_resource_name) return;
-
-    // Format tags as readable labels for Google
-    const labelText = tags
-      .map((t: any) => t.value || t.tag.replace(/_/g, " "))
-      .join(", ");
-
-    // We'll store tags in the biography/notes field in Google
-    // This is non-destructive — appends to existing notes
-    const { data: existing } = await supabase
-      .from("tom_contacts")
-      .select("notes")
-      .eq("id", contactId)
-      .single();
-
-    const tagNote = `[Tags: ${labelText}]`;
-    const existingNotes = existing?.notes || "";
-    const cleanedNotes = existingNotes.replace(/\[Tags:.*?\]/g, "").trim();
-    const updatedNotes = cleanedNotes ? `${cleanedNotes}\n${tagNote}` : tagNote;
-
-    await supabase
-      .from("tom_contacts")
-      .update({ notes: updatedNotes })
-      .eq("id", contactId)
-      .eq("user_id", userId);
-
-  } catch (e) {
-    console.error("Google tag sync error:", e);
-  }
+async function syncTagsToGoogle(_userId: string, _contactId: string, _tags: any[]) {
+  // Tags stay on tom_contacts.tags. This used to rewrite the notes field, which
+  // replaced notes a person had typed and could then be pushed to Google.
+  return;
 }
 
 export async function GET(req: NextRequest) {

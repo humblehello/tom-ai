@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createClient } from "@supabase/supabase-js";
+import { emailTakenBySomeoneElse, insertContact, selectContacts, updateContact, withHumanStamp } from "../../../lib/contactWrite";
 import { getValidAccessToken } from "@/app/lib/google";
 import { inngest } from "@/app/lib/inngest";
 
@@ -85,23 +86,41 @@ export async function POST(req: NextRequest) {
       if (!contact.full_name) continue;
 
       // ── Find existing contact ────────────────────────────────────────────
+      // Email, or an exact full name. First-name and fuzzy matches were
+      // writing one person's email and phone onto a different person.
       let existing = null;
+      let matchedBy: "email" | "name" | null = null;
+      const journalSelect = "id, google_resource_name, key_context, notes, journal_signals, email";
 
       if (contact.email) {
-        const { data } = await supabase.from("tom_contacts").select("id, google_resource_name, key_context, notes, journal_signals").eq("user_id", userId).eq("email", contact.email).maybeSingle();
-        existing = data;
+        const { data } = await selectContacts(supabase, journalSelect, (query) =>
+          query.eq("user_id", userId).ilike("email", contact.email).limit(2)
+        );
+        if ((data || []).length === 1) {
+          existing = data[0];
+          matchedBy = "email";
+        } else if ((data || []).length > 1) {
+          continue;
+        }
       }
       if (!existing && contact.full_name) {
-        const { data } = await supabase.from("tom_contacts").select("id, google_resource_name, key_context, notes, journal_signals").eq("user_id", userId).ilike("full_name", contact.full_name).maybeSingle();
-        existing = data;
+        const { data } = await selectContacts(supabase, journalSelect, (query) =>
+          query.eq("user_id", userId).ilike("full_name", contact.full_name).limit(2)
+        );
+        if ((data || []).length === 1) {
+          existing = data[0];
+          matchedBy = "name";
+        }
       }
-      if (!existing && contact.first_name && contact.last_name) {
-        const { data } = await supabase.from("tom_contacts").select("id, google_resource_name, key_context, notes, journal_signals").eq("user_id", userId).ilike("full_name", `${contact.first_name}%${contact.last_name}%`).maybeSingle();
-        existing = data;
-      }
-      if (!existing && contact.first_name) {
-        const { data } = await supabase.from("tom_contacts").select("id, google_resource_name, key_context, notes, journal_signals").eq("user_id", userId).ilike("full_name", `${contact.first_name}%`).limit(1).maybeSingle();
-        existing = data;
+
+      if (
+        existing &&
+        matchedBy === "name" &&
+        existing.email &&
+        contact.email &&
+        existing.email.toLowerCase() !== contact.email.toLowerCase()
+      ) {
+        continue;
       }
 
       // ── Build signals and notes ──────────────────────────────────────────
@@ -196,11 +215,22 @@ export async function POST(req: NextRequest) {
       }
 
       // ── Save to Supabase ─────────────────────────────────────────────────
+      if (contactData.email) {
+        const decision = await emailTakenBySomeoneElse(
+          supabase,
+          userId,
+          contactData.email,
+          existing?.id,
+          contactData.full_name || existing?.full_name
+        );
+        if (decision === "reject") delete contactData.email;
+      }
+      const stamped = withHumanStamp(existing?.field_provenance, contactData);
       if (existing) {
-        await supabase.from("tom_contacts").update(contactData).eq("id", existing.id).eq("user_id", userId);
+        await updateContact(supabase, existing.id, userId, stamped);
         updated++;
       } else {
-        await supabase.from("tom_contacts").insert(contactData);
+        await insertContact(supabase, stamped);
         created++;
       }
 

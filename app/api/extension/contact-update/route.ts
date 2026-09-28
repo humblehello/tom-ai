@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 import Anthropic from "@anthropic-ai/sdk";
 import { getValidAccessToken } from "../../../lib/google";
+import { keepFilledIdentity, emailTakenBySomeoneElse } from "../../../lib/contactWrite";
 import { updateGoogleContact } from "../../../lib/googleContacts";
 
 export const maxDuration = 60;
@@ -272,7 +273,7 @@ export async function POST(req: NextRequest) {
     const changedFields: string[] = [];
     const now = new Date().toISOString();
 
-    // ── AUTO-OVERWRITE fields ──
+    // LinkedIn enrichment fills blanks. It does not replace a value already on the contact.
     const latestRole = linkedinData.experience?.[0];
 
     if (latestRole?.company && latestRole.company !== existing.company) {
@@ -328,7 +329,10 @@ export async function POST(req: NextRequest) {
         .filter(Boolean)
         .map((e: string) => e.toLowerCase().trim());
 
-      if (!existingEmails.includes(newEmail)) {
+      const emailDecision = await emailTakenBySomeoneElse(
+        supabase, userId, newEmail, existing.id, existing.full_name
+      );
+      if (!existingEmails.includes(newEmail) && emailDecision !== "reject") {
         if (!existing.personal_email) {
           updates.personal_email = newEmail;
           changedFields.push("personal_email");
@@ -463,9 +467,18 @@ export async function POST(req: NextRequest) {
     updates.intelligence = intelSnapshot;
     updates.intelligence_scan_at = now;
 
-    // Always update timestamps
+    const protectedFields = ["company", "job_title", "title", "linkedin_url", "seniority", "city", "birthday", "phone"];
+    keepFilledIdentity(existing, updates, protectedFields);
+    for (const field of protectedFields) {
+      if (!Object.prototype.hasOwnProperty.call(updates, field)) {
+        const idx = changedFields.indexOf(field);
+        if (idx >= 0) changedFields.splice(idx, 1);
+      }
+    }
+
+    // Do not stamp tom_ai_updated_at. That flag is reserved for a person's edit;
+    // setting it here made the next Google sync treat LinkedIn data as a human edit.
     updates.last_synced_at = now;
-    updates.tom_ai_updated_at = now;
 
     // ── 3. Apply updates ──
     if (Object.keys(updates).length === 0) {

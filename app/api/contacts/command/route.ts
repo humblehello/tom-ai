@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createClient } from "@supabase/supabase-js";
+import { withHumanStamp, isMissingProvenanceColumn } from "../../../lib/contactWrite";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -90,10 +91,12 @@ Return ONLY the JSON object, no markdown.`,
 }
 
 // ── Build Supabase query from filter ─────────────────────────────────────────
-async function getMatchingContacts(userId: string, filter: any): Promise<any[]> {
+async function getMatchingContacts(userId: string, filter: any, includeProvenance = true): Promise<any[]> {
+  const columns = "id, full_name, email, company, relationship_type, notes, key_context, topics, tags, home_address, last_emailed_at"
+    + (includeProvenance ? ", field_provenance" : "");
   let query = supabase
     .from("tom_contacts")
-    .select("id, full_name, email, company, relationship_type, notes, key_context, topics, tags, home_address, last_emailed_at")
+    .select(columns)
     .eq("user_id", userId);
 
   if (filter.email_domain) {
@@ -138,8 +141,11 @@ async function getMatchingContacts(userId: string, filter: any): Promise<any[]> 
   }
 
   query = query.limit(500);
-  const { data } = await query;
-  let results = data || [];
+  const { data, error } = await query;
+  if (error && includeProvenance && isMissingProvenanceColumn(error)) {
+    return getMatchingContacts(userId, filter, false);
+  }
+  let results: any[] = (data as any[]) || [];
 
   // Post-filter for pipe OR conditions
   if (filter.notes_contains?.includes("|")) {
@@ -255,12 +261,16 @@ async function executeUpdates(
       }
 
       update.tom_ai_updated_at = new Date().toISOString();
-      return update;
+      return withHumanStamp(contact.field_provenance, update);
     });
 
-    await supabase
+    const { error } = await supabase
       .from("tom_contacts")
       .upsert(batchUpdates, { onConflict: "id" });
+    if (error && isMissingProvenanceColumn(error)) {
+      const stripped = batchUpdates.map(({ field_provenance: _prov, ...rest }: any) => rest);
+      await supabase.from("tom_contacts").upsert(stripped, { onConflict: "id" });
+    }
   }
 
   return { updated: contacts.length, undoId };

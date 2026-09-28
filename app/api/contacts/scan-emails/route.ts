@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createClient } from "@supabase/supabase-js";
 import { getValidAccessToken } from "../../../lib/google";
+import { fillBlankFields } from "../../../lib/contactFieldPolicy";
+import { selectContacts, updateContact } from "../../../lib/contactWrite";
 
 export const maxDuration = 60;
 
@@ -195,25 +197,27 @@ export async function POST(req: NextRequest) {
 
     if (contact_id) {
       // Single contact scan
-      const { data } = await supabase
-        .from("tom_contacts")
-        .select("id, full_name, email, email_count, key_context, topics")
-        .eq("id", contact_id)
-        .eq("user_id", userId)
-        .single();
+      const { data } = await selectContacts(
+        supabase,
+        "id, full_name, email, email_count, key_context, topics, notes_context, best_channel, relationship_context",
+        (query) => query.eq("id", contact_id).eq("user_id", userId).single()
+      );
       if (data) contacts = [data];
     } else {
       // Batch — top contacts by email count not yet scanned or scanned > 30 days ago
       const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-      const { data } = await supabase
-        .from("tom_contacts")
-        .select("id, full_name, email, email_count, key_context, topics")
-        .eq("user_id", userId)
-        .not("email", "is", null)
-        .gte("email_count", 5)
-        .or(`email_scan_at.is.null,email_scan_at.lt.${thirtyDaysAgo}`)
-        .order("email_count", { ascending: false })
-        .limit(batch_size);
+      const { data } = await selectContacts(
+        supabase,
+        "id, full_name, email, email_count, key_context, topics, notes_context, best_channel, relationship_context",
+        (query) =>
+          query
+            .eq("user_id", userId)
+            .not("email", "is", null)
+            .gte("email_count", 5)
+            .or(`email_scan_at.is.null,email_scan_at.lt.${thirtyDaysAgo}`)
+            .order("email_count", { ascending: false })
+            .limit(batch_size)
+      );
       contacts = data || [];
     }
 
@@ -238,24 +242,24 @@ export async function POST(req: NextRequest) {
         // Analyze with Claude
         const analysis = await analyzeEmailsWithClaude(contact.full_name, contact.email, emails);
 
-        // Save back to contact
+        // Save back to contact. Collected notes and context are fill-blank only.
         const updates: any = {
           email_scan_at: new Date().toISOString(),
+          ...fillBlankFields(
+            contact,
+            {
+              key_context: analysis.key_context,
+              topics: analysis.topics?.length > 0 ? analysis.topics : null,
+              best_channel: analysis.relationship_tone,
+              notes_context: analysis.last_discussed,
+              relationship_context: analysis.action_items && analysis.action_items !== "None" ? analysis.action_items : null,
+            },
+            ["key_context", "topics", "best_channel", "notes_context", "relationship_context"],
+            "enrichment"
+          ),
         };
 
-        if (analysis.key_context) updates.key_context = analysis.key_context;
-        if (analysis.topics?.length > 0) updates.topics = analysis.topics;
-        if (analysis.relationship_tone) updates.best_channel = analysis.relationship_tone;
-        if (analysis.last_discussed) updates.notes_context = analysis.last_discussed;
-        if (analysis.action_items && analysis.action_items !== "None") {
-          updates.relationship_context = analysis.action_items;
-        }
-
-        await supabase
-          .from("tom_contacts")
-          .update(updates)
-          .eq("id", contact.id)
-          .eq("user_id", userId);
+        await updateContact(supabase, contact.id, userId, updates);
 
         results.push({
           name: contact.full_name,

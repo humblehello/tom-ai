@@ -4,6 +4,8 @@ import { createClient } from "@supabase/supabase-js";
 import { deleteGoogleContact, updateGoogleContact } from "../../../lib/googleContacts";
 import { getValidAccessToken } from "../../../lib/google";
 import { logSyncEvent, summarizeFieldsForAudit } from "../../../lib/syncAudit";
+import { markFieldsSynced } from "../../../lib/contactFieldPolicy";
+import { selectContacts, updateContact, withHumanStamp } from "../../../lib/contactWrite";
 
 type RouteParams = { params: Promise<{ id: string }> };
 
@@ -84,19 +86,25 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
   const body = await req.json();
 
   // Strip fields that should never be client-writable
-  const { id: _id, user_id: _uid, created_at: _ca, google_resource_name: _grn, ...updates } = body;
+  const {
+    id: _id,
+    user_id: _uid,
+    created_at: _ca,
+    google_resource_name: _grn,
+    field_provenance: _prov,
+    ...updates
+  } = body;
 
-  // Always stamp tom_ai_updated_at so sync knows Humble Hello made the last edit
-  updates.tom_ai_updated_at = new Date().toISOString();
+  const { data: existingRow } = await selectContacts(supabase, "field_provenance", (query) =>
+    query.eq("id", id).eq("user_id", userId).maybeSingle()
+  );
+
+  // Stamp the edit as human so a later Google pull cannot silently undo it.
+  const stamped = withHumanStamp(existingRow?.field_provenance, updates);
+  stamped.tom_ai_updated_at = new Date().toISOString();
 
   // Save to Supabase first
-  const { data, error } = await supabase
-    .from("tom_contacts")
-    .update(updates)
-    .eq("id", id)
-    .eq("user_id", userId)
-    .select()
-    .single();
+  const { data, error } = await updateContact(supabase, id, userId, stamped, { returning: true });
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 
@@ -148,6 +156,23 @@ export async function PATCH(req: NextRequest, { params }: RouteParams) {
           success: syncSuccess,
           error_message: syncError,
         });
+
+        if (syncSuccess) {
+          const syncedValues: Record<string, any> = {};
+          if (googleUpdates.full_name !== undefined) syncedValues.full_name = googleUpdates.full_name;
+          if (googleUpdates.email !== undefined) syncedValues.email = googleUpdates.email;
+          if (googleUpdates.phone !== undefined) syncedValues.phone = googleUpdates.phone;
+          if (googleUpdates.company !== undefined) syncedValues.company = googleUpdates.company;
+          if (googleUpdates.job_title !== undefined) syncedValues.job_title = googleUpdates.job_title;
+          if (googleUpdates.birthday !== undefined) syncedValues.birthday = googleUpdates.birthday;
+          if (googleUpdates.notes !== undefined) syncedValues.notes = googleUpdates.notes;
+          if (googleUpdates.key_context !== undefined) syncedValues.key_context = googleUpdates.key_context;
+          if (googleUpdates.address !== undefined) syncedValues.home_address = googleUpdates.address;
+          if (googleUpdates.work_address !== undefined) syncedValues.work_address = googleUpdates.work_address;
+          await updateContact(supabase, contact.id, userId, {
+            field_provenance: markFieldsSynced(contact.field_provenance, Object.keys(syncedValues), syncedValues),
+          });
+        }
       }
     }
   } catch (e: any) {

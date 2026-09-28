@@ -608,16 +608,28 @@ export async function classifyRelationship(
     relationship_health: classification.relationship_health,
     communication_style: classification.communication_style,
     initiation_balance: classification.initiation_balance,
-    topics: classification.topics,
-    key_context: classification.key_context,
-    best_channel: classification.best_channel,
-    best_time: classification.best_time,
-    relationship_context: classification.next_action,
     calendar_intimacy_score: calendarProfile.calendarIntimacyScore,
     shared_events: calendarProfile.sharedEvents,
     classifier_confidence: classification.confidence,
     last_classified_at: new Date().toISOString(),
   };
+
+  // Narrative fields a person collected are not replaced by the classifier.
+  const narrative = {
+    topics: classification.topics,
+    key_context: classification.key_context,
+    best_channel: classification.best_channel,
+    best_time: classification.best_time,
+    relationship_context: classification.next_action,
+  };
+  const provenance = contact.field_provenance || {};
+  for (const [field, value] of Object.entries(narrative)) {
+    if (!value || (Array.isArray(value) && value.length === 0)) continue;
+    if (provenance[field]?.source === "human") continue;
+    const current = contact[field];
+    const empty = current == null || current === "" || (Array.isArray(current) && current.length === 0);
+    if (empty) updatePayload[field] = value;
+  }
 
   // Primary relationship_type write — only if the contact doesn't already have one set.
   // Users who picked a type manually keep that type. Classifier can only fill in blanks.

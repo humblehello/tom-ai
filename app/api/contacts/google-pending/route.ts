@@ -1,6 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createClient } from "@supabase/supabase-js";
+import { emailAssignmentDecision, normalizeEmail } from "../../../lib/contactFieldPolicy";
+import { findContactsWithEmail } from "../../../lib/contactWrite";
+import { applyGoogleToExisting, createFromGoogle, loadContactById, loadContactByResource } from "../../../lib/googleContactSync";
+import { getValidAccessToken } from "../../../lib/google";
 
 export const dynamic = "force-dynamic";
 
@@ -12,6 +16,71 @@ const supabase = createClient(
 async function getUserId(): Promise<string | null> {
   const cookieStore = await cookies();
   return cookieStore.get("tom_session")?.value || null;
+}
+
+async function approveOneGooglePending(userId: string, c: any): Promise<"approved" | "skipped"> {
+  const owners = c.email ? await findContactsWithEmail(supabase, userId, c.email) : [];
+  const decision = emailAssignmentDecision({
+    incomingEmail: c.email,
+    incomingName: c.full_name,
+    incomingResource: c.google_resource_name,
+    owners,
+  });
+  if (decision === "reject") return "skipped";
+
+  let accessToken = "";
+  try {
+    accessToken = await getValidAccessToken(userId);
+  } catch {
+    accessToken = "";
+  }
+
+  const incoming = {
+    full_name: c.full_name,
+    email: normalizeEmail(c.email),
+    phone: c.phone,
+    company: c.company,
+    job_title: c.job_title,
+    home_address: c.home_address,
+    birthday: c.birthday,
+  };
+  const phonesArray = c.phone ? [{ number: c.phone, type: "cell", primary: true }] : [];
+
+  if (decision === "same_person" && owners[0]) {
+    const { data: linked } = await loadContactById(supabase, userId, owners[0].id);
+    if (!linked) return "skipped";
+    if (linked.google_resource_name && linked.google_resource_name !== c.google_resource_name) return "skipped";
+    await applyGoogleToExisting(
+      supabase, userId, accessToken, linked, c.google_resource_name, incoming,
+      c.all_emails || [], c.all_phones || [], phonesArray, null
+    );
+    return "approved";
+  }
+
+  const { data: existing } = c.google_resource_name
+    ? await loadContactByResource(supabase, userId, c.google_resource_name)
+    : { data: null };
+  if (existing) {
+    await applyGoogleToExisting(
+      supabase, userId, accessToken, existing, c.google_resource_name, incoming,
+      c.all_emails || [], c.all_phones || [], phonesArray, null
+    );
+    return "approved";
+  }
+
+  const created = await createFromGoogle(supabase, userId, c.google_resource_name, {
+    full_name: c.full_name,
+    email: normalizeEmail(c.email),
+    phone: c.phone,
+    all_emails: c.all_emails,
+    all_phones: c.all_phones,
+    company: c.company,
+    job_title: c.job_title,
+    home_address: c.home_address,
+    birthday: c.birthday,
+    last_synced_at: new Date().toISOString(),
+  });
+  return created.contactId ? "approved" : "skipped";
 }
 
 // GET — fetch pending contacts + count
@@ -42,25 +111,19 @@ export async function POST(req: NextRequest) {
       .select("*")
       .eq("user_id", userId);
 
+    let approved = 0;
+    let skipped = 0;
     for (const c of pending || []) {
-      await supabase.from("tom_contacts").upsert({
-        user_id: userId,
-        full_name: c.full_name,
-        email: c.email,
-        phone: c.phone,
-        all_emails: c.all_emails,
-        all_phones: c.all_phones,
-        company: c.company,
-        job_title: c.job_title,
-        home_address: c.home_address,
-        birthday: c.birthday,
-        google_resource_name: c.google_resource_name,
-        last_synced_at: new Date().toISOString(),
-      }, { onConflict: "user_id,google_resource_name" });
+      const result = await approveOneGooglePending(userId, c);
+      if (result === "approved") {
+        approved++;
+        await supabase.from("google_pending_contacts").delete().eq("id", c.id).eq("user_id", userId);
+      } else {
+        skipped++;
+      }
     }
 
-    await supabase.from("google_pending_contacts").delete().eq("user_id", userId);
-    return NextResponse.json({ ok: true, approved: pending?.length || 0 });
+    return NextResponse.json({ ok: true, approved, skipped });
   }
 
   if (action === "approve" && id) {
@@ -72,20 +135,13 @@ export async function POST(req: NextRequest) {
       .single();
 
     if (c) {
-      await supabase.from("tom_contacts").insert({
-        user_id: userId,
-        full_name: c.full_name,
-        email: c.email,
-        phone: c.phone,
-        all_emails: c.all_emails,
-        all_phones: c.all_phones,
-        company: c.company,
-        job_title: c.job_title,
-        home_address: c.home_address,
-        birthday: c.birthday,
-        google_resource_name: c.google_resource_name,
-        last_synced_at: new Date().toISOString(),
-      });
+      const result = await approveOneGooglePending(userId, c);
+      if (result !== "approved") {
+        return NextResponse.json({
+          ok: false,
+          error: "That email already belongs to a different person, so this contact was not imported.",
+        }, { status: 409 });
+      }
       await supabase.from("google_pending_contacts").delete().eq("id", id);
     }
     return NextResponse.json({ ok: true });

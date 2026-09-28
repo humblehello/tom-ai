@@ -3,6 +3,8 @@ import { createClient } from '@supabase/supabase-js';
 import { cookies } from 'next/headers';
 import { createGoogleContact } from '../../lib/googleContacts';
 import { getValidAccessToken } from '../../lib/google';
+import { emailTakenBySomeoneElse, insertContact } from '../../lib/contactWrite';
+import { stampHumanEdits } from '../../lib/contactFieldPolicy';
 
 async function getUserId() {
   const cookieStore = await cookies();
@@ -122,14 +124,24 @@ export async function POST(req) {
   const body = await req.json();
 
   // Strip any client-supplied identity fields — always use session userId
-  const { id: _id, user_id: _uid, created_at: _ca, google_resource_name: _grn, ...fields } = body;
+  const { id: _id, user_id: _uid, created_at: _ca, google_resource_name: _grn, field_provenance: _prov, ...fields } = body;
+
+  if (fields.email) {
+    const decision = await emailTakenBySomeoneElse(supabase, userId, fields.email, null, fields.full_name);
+    if (decision !== 'allow') {
+      return NextResponse.json({ error: 'That email already belongs to another person.' }, { status: 409 });
+    }
+  }
+
+  const humanFields = ['full_name', 'email', 'phone', 'company', 'job_title', 'home_address', 'birthday', 'notes', 'key_context'];
+  fields.field_provenance = stampHumanEdits({}, fields, humanFields);
 
   // Step 1: Insert into Supabase first
-  const { data: contact, error } = await supabase
-    .from('tom_contacts')
-    .insert({ ...fields, user_id: userId })
-    .select()
-    .single();
+  const { data: contact, error } = await insertContact(
+    supabase,
+    { ...fields, user_id: userId },
+    { returning: true }
+  );
 
   if (error) return NextResponse.json({ error: error.message }, { status: 500 });
 

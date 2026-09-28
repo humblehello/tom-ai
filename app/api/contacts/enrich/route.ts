@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createClient } from "@supabase/supabase-js";
+import { fillBlankFields } from "../../../lib/contactFieldPolicy";
+import { selectContacts, updateContact } from "../../../lib/contactWrite";
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -94,12 +96,11 @@ export async function POST(req: NextRequest) {
   if (!contact_id) return NextResponse.json({ error: "Missing contact_id" }, { status: 400 });
 
   // Fetch contact
-  const { data: contact } = await supabase
-    .from("tom_contacts")
-    .select("id, full_name, email, company, job_title, city, apollo_enriched_at")
-    .eq("id", contact_id)
-    .eq("user_id", userId)
-    .single();
+  const { data: contact } = await selectContacts(
+    supabase,
+    "id, full_name, email, company, job_title, city, linkedin_url, industry, company_description, company_size, seniority, funding_stage, technologies, apollo_enriched_at",
+    (query) => query.eq("id", contact_id).eq("user_id", userId).single()
+  );
 
   if (!contact) return NextResponse.json({ error: "Contact not found" }, { status: 404 });
 
@@ -132,29 +133,30 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ success: false, reason: "No match found in Apollo" });
   }
 
-  // Build update — only overwrite fields that are currently empty
+  // Fill blanks only. Apollo used to replace LinkedIn, industry, and seniority
+  // even when a person had already set them.
   const updates: Record<string, any> = {
     apollo_enriched_at: new Date().toISOString(),
+    ...fillBlankFields(
+      contact,
+      {
+        job_title: enriched.job_title,
+        company: enriched.company,
+        industry: enriched.company_industry,
+        company_description: enriched.company_description,
+        company_size: enriched.company_size,
+        linkedin_url: enriched.linkedin_url,
+        seniority: enriched.seniority,
+        funding_stage: enriched.funding_stage,
+        technologies: enriched.technologies,
+        city: enriched.city,
+      },
+      ["job_title", "company", "industry", "company_description", "company_size", "linkedin_url", "seniority", "funding_stage", "technologies", "city"],
+      "enrichment"
+    ),
   };
 
-  if (!contact.job_title && enriched.job_title) updates.job_title = enriched.job_title;
-  if (!contact.company && enriched.company) updates.company = enriched.company;
-  if (enriched.company_industry) updates.industry = enriched.company_industry;
-  if (enriched.company_description) updates.company_description = enriched.company_description;
-  if (enriched.company_size) updates.company_size = enriched.company_size;
-  if (enriched.linkedin_url) updates.linkedin_url = enriched.linkedin_url;
-  if (enriched.seniority) updates.seniority = enriched.seniority;
-  if (enriched.funding_stage) updates.funding_stage = enriched.funding_stage;
-  if (enriched.technologies?.length) updates.technologies = enriched.technologies;
-
-  // Only set city/state if not already set
-  if (!contact.city && enriched.city) updates.city = enriched.city;
-
-  await supabase
-    .from("tom_contacts")
-    .update(updates)
-    .eq("id", contact_id)
-    .eq("user_id", userId);
+  await updateContact(supabase, contact_id, userId, updates);
 
   return NextResponse.json({ success: true, enriched });
 }
