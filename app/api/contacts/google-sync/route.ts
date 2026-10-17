@@ -4,6 +4,7 @@ import { NextResponse } from "next/server";
 import { getValidAccessToken } from "@/app/lib/google";
 import { updateGoogleContact } from "@/app/lib/googleContacts";
 import { isBlockedEmail } from "@/app/lib/contact-blocklist";
+import { findContactsByEmail } from "@/app/lib/contact-dedupe";
 
 function fmtPhone(raw: string): string {
   if (!raw) return raw;
@@ -295,16 +296,20 @@ const allPhones = person.phoneNumbers?.map((p: any) => p.value).filter(Boolean) 
             if (guard !== "allow") continue;
           }
 
-          // Check if contact already exists by email before inserting
-          let existingByEmail = null;
+          // Check if contact already exists by email before inserting.
+          // maybeSingle() returns no row when this email is already on more
+          // than one contact, and the old code then inserted another copy.
+          let existingByEmail: { id: string; phone?: string | null } | null = null;
+          let emailAlreadyStored = false;
           if (googleEmail) {
-          const { data: emailMatch } = await supabase
-            .from("tom_contacts")
-            .select("id, google_resource_name")
-            .eq("user_id", userId)
-            .ilike("email", googleEmail)
-            .maybeSingle();
-          existingByEmail = emailMatch;
+            const emailMatch = await findContactsByEmail(supabase, userId, googleEmail);
+            if (emailMatch.status === "one") existingByEmail = emailMatch.contact;
+            else if (emailMatch.status === "many" || emailMatch.status === "error") emailAlreadyStored = true;
+          }
+
+        if (emailAlreadyStored) {
+          console.warn(`Skipping Google insert; ${googleEmail} is already on more than one contact`);
+          continue;
         }
 
         if (existingByEmail) {
@@ -313,7 +318,8 @@ const allPhones = person.phoneNumbers?.map((p: any) => p.value).filter(Boolean) 
             .update({
               google_resource_name: resourceName,
               last_synced_at: new Date().toISOString(),
-              ...(googlePhone && { phone: fmtPhone(googlePhone) }),
+              // Don't replace a phone Humble Hello already stored. Google can fill a blank.
+              ...(googlePhone && !existingByEmail.phone && { phone: fmtPhone(googlePhone) }),
               ...(googleCompany && { company: googleCompany }),
               ...(googleJobTitle && { job_title: googleJobTitle }),
             })

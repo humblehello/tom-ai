@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createClient } from "@supabase/supabase-js";
+import { findContactsByEmail, findContactsByName } from "../../../lib/contact-dedupe";
 export const maxDuration = 60;
 
 const supabase = createClient(
@@ -189,26 +190,18 @@ Respond ONLY with JSON:
     for (const contact of contacts) {
       if (!contact.email && !contact.full_name) { skipped++; continue; }
 
-      let existing = null;
+      let existing: { id: string; import_attributes?: any } | null = null;
 
       if (contact.email) {
-        const { data } = await supabase
-          .from("tom_contacts")
-          .select("id, import_attributes")
-          .eq("user_id", userId)
-          .eq("email", contact.email)
-          .maybeSingle();
-        existing = data;
+        const found = await findContactsByEmail(supabase, userId, contact.email);
+        if (found.status === "one") existing = found.contact;
+        else if (found.status === "many" || found.status === "error") { skipped++; continue; }
       }
 
       if (!existing && contact.full_name) {
-        const { data } = await supabase
-          .from("tom_contacts")
-          .select("id, import_attributes")
-          .eq("user_id", userId)
-          .ilike("full_name", contact.full_name)
-          .maybeSingle();
-        existing = data;
+        const found = await findContactsByName(supabase, userId, contact.full_name);
+        if (found.status === "one") existing = found.contact;
+        else if (found.status === "many" || found.status === "error") { skipped++; continue; }
       }
 
       const contactData: any = {

@@ -26,7 +26,7 @@ export type EditableContact = {
   met_where?: string;
   birthday?: string;
   all_emails?: string[];
-  phones?: { number: string; type: "cell" | "work" | "home"; primary?: boolean }[];
+  phones?: { number: string; type: "cell" | "work" | "home"; label?: string; primary?: boolean }[];
   linkedin_url?: string;
   twitter_url?: string;
   instagram_url?: string;
@@ -339,7 +339,7 @@ export default function EditModal({ contact, onClose, onSave }: {
                       onChange={e => setForm(f => ({ ...f, phones: f.phones.map((ph, j) => j === i ? { ...ph, number: e.target.value } : ph) }))}
                       style={iStyle} placeholder="(317) 555-0123" />
                     <select value={p.type}
-                      onChange={e => setForm(f => ({ ...f, phones: f.phones.map((ph, j) => j === i ? { ...ph, type: e.target.value as "cell" | "work" | "home" } : ph) }))}
+                      onChange={e => setForm(f => ({ ...f, phones: f.phones.map((ph, j) => j === i ? { ...ph, type: e.target.value as "cell" | "work" | "home", label: undefined } : ph) }))}
                       style={{ ...iStyle, cursor: "pointer", padding: "10px 8px" }}>
                       <option value="cell">📱 Cell</option>
                       <option value="work">☎️ Work</option>

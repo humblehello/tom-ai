@@ -2,9 +2,24 @@ import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createClient } from "@supabase/supabase-js";
 import { getValidAccessToken } from "../../../lib/google";
-import { createGoogleContact } from "../../../lib/googleContacts";
+import { createGoogleContact, updateGoogleContact } from "../../../lib/googleContacts";
 import { contactImportGuard } from "../../../lib/contactGuard";
 import { isBlockedEmail } from "@/app/lib/contact-blocklist";
+import { findContactsByEmail, insertDecision } from "../../../lib/contact-dedupe";
+import {
+  collectPhoneOwners,
+  extractBodiesFromPayload,
+  headerValue,
+  internalEmployeesFromContacts,
+  mergeSignatureParses,
+  parseAddress,
+  parseSenderSignature,
+  signatureFieldUpdates,
+  type InternalEmployee,
+  type OtherPhoneOwner,
+  type PhoneConflict,
+  type SignatureParseResult,
+} from "../../../lib/signature-parser";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -34,77 +49,52 @@ function extractTextFromPayload(payload: any): string {
   return "";
 }
 
-// ── Parse signature from email body ─────────────────────────────────────────
-function extractSignature(body: string): string {
-  // Signatures typically appear after -- or blank line near end
-  const lines = body.split("\n");
-  const sigMarkers = ["--", "___", "Best,", "Best regards,", "Thanks,", "Sincerely,", "Cheers,", "Regards,", "Thanks!", "Thank you,", "Sent from"];
-  let sigStart = -1;
-  for (let i = Math.max(0, lines.length - 20); i < lines.length; i++) {
-    const line = lines[i].trim();
-    if (sigMarkers.some(m => line === m || line.startsWith(m))) { sigStart = i; break; }
+async function loadSignatureContext(userId: string): Promise<{ employees: InternalEmployee[]; owners: OtherPhoneOwner[] }> {
+  const { data, error } = await supabase
+    .from("tom_contacts")
+    .select("id, full_name, email, all_emails, phone, phones, all_phones")
+    .eq("user_id", userId);
+  if (error || !data) {
+    console.error("Signature context load failed:", error?.message);
+    return { employees: [], owners: [] };
   }
-  if (sigStart === -1) sigStart = Math.max(0, lines.length - 8);
-  return lines.slice(sigStart).join("\n").slice(0, 500);
+  return {
+    employees: internalEmployeesFromContacts(data),
+    owners: collectPhoneOwners(data),
+  };
 }
 
-function parseSignatureData(sig: string, existingContact: any): Partial<any> {
-  const updates: any = {};
-
-  // Phone: various formats
-  const phoneMatch = sig.match(/(?:(?:Phone|Tel|Mobile|Cell|M|P|Ph)[:\s.]*)?(?:\+1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}/i);
-  if (phoneMatch && !existingContact.phone) {
-    const digits = phoneMatch[0].replace(/\D/g, "");
-    if (digits.length === 10) updates.phone = `(${digits.slice(0,3)}) ${digits.slice(3,6)}-${digits.slice(6)}`;
-    else if (digits.length === 11 && digits[0] === "1") updates.phone = `+1 (${digits.slice(1,4)}) ${digits.slice(4,7)}-${digits.slice(7)}`;
+async function recordPhoneConflicts(
+  userId: string,
+  contact: { id: string; full_name?: string | null; email?: string | null; phone?: string | null },
+  conflicts: PhoneConflict[]
+) {
+  for (const conflict of conflicts) {
+    const { error } = await supabase.from("tom_contact_updates").insert({
+      user_id: userId,
+      contact_id: contact.id,
+      contact_name: contact.full_name || null,
+      field_updated: "phone_conflict",
+      old_value: contact.phone || null,
+      new_value: `${conflict.number} [${conflict.kind}] ${conflict.detail}`.slice(0, 500),
+      source: "signature_parse",
+      email_subject: null,
+      email_from: contact.email || null,
+    });
+    if (error) console.error("phone_conflict log failed:", error.message);
   }
-
-  // LinkedIn URL
-  const linkedinMatch = sig.match(/linkedin\.com\/in\/[\w-]+/i);
-  if (linkedinMatch && !existingContact.linkedin_url) {
-    updates.linkedin_url = `https://${linkedinMatch[0]}`;
-  }
-
-  // Twitter
-  const twitterMatch = sig.match(/(?:twitter\.com|x\.com)\/[\w]+/i);
-  if (twitterMatch && !existingContact.twitter_url) {
-    updates.twitter_url = `https://${twitterMatch[0]}`;
-  }
-
-  // Job title — look for lines that look like titles (2-5 words, title case, no @ symbol)
-  if (!existingContact.job_title) {
-    const lines = sig.split("\n").map(l => l.trim()).filter(l => l.length > 2 && l.length < 60 && !l.includes("@") && !l.match(/\d{3}/));
-    const titlePatterns = /(CEO|CTO|CFO|COO|VP|Director|Manager|President|Founder|Partner|Principal|Engineer|Developer|Designer|Consultant|Analyst|Executive|Officer|Head of|Lead)/i;
-    const titleLine = lines.find(l => titlePatterns.test(l));
-    if (titleLine) updates.job_title = titleLine.slice(0, 80);
-  }
-
-  // Company — line after title often
-  if (!existingContact.company && updates.job_title) {
-    const lines = sig.split("\n").map(l => l.trim()).filter(l => l.length > 2 && l.length < 60 && !l.includes("@"));
-    const titleIdx = lines.findIndex(l => l === updates.job_title);
-    if (titleIdx >= 0 && titleIdx < lines.length - 1) {
-      const candidate = lines[titleIdx + 1];
-      if (candidate && !candidate.match(/\d{3}/) && !candidate.match(/linkedin|twitter|http/i)) {
-        updates.company = candidate.slice(0, 80);
-      }
-    }
-  }
-
-  return updates;
 }
 
 // ── Process signatures for N contacts ────────────────────────────────────────
 async function processSignatures(userId: string, batchSize: number) {
   const accessToken = await getValidAccessToken(userId);
-  const { data: userData } = await supabase.from("tom_users").select("email").eq("id", userId).single();
-  const ownEmail = userData?.email?.toLowerCase() || "";
+  const context = await loadSignatureContext(userId);
 
   // Pick contacts with emails, not yet signature-scanned, prioritize by email count
   const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
   const { data: contacts } = await supabase
     .from("tom_contacts")
-    .select("id, email, phone, job_title, company, linkedin_url, twitter_url")
+    .select("id, full_name, email, phone, phones, job_title, company, linkedin_url, twitter_url, google_resource_name")
     .eq("user_id", userId)
     .not("email", "is", null)
     .or(`signature_scanned_at.is.null,signature_scanned_at.lt.${sevenDaysAgo}`)
@@ -114,37 +104,56 @@ async function processSignatures(userId: string, batchSize: number) {
   let updated = 0;
   for (const contact of contacts || []) {
     try {
-      // Fetch last 3 emails from this contact
+      // Only mail this person sent. Sent-mail signatures belong to the account owner.
       const url = new URL("https://gmail.googleapis.com/gmail/v1/users/me/messages");
-      url.searchParams.set("q", `from:${contact.email}`);
+      url.searchParams.set("q", `from:${contact.email} -category:promotions`);
       url.searchParams.set("maxResults", "3");
       const listRes = await fetch(url.toString(), { headers: { Authorization: `Bearer ${accessToken}` } });
       const listData = await listRes.json();
-// ── Create new contacts from recent incoming emails ───────────────────────
 
       if (!listData.messages?.length) {
         await supabase.from("tom_contacts").update({ signature_scanned_at: new Date().toISOString() }).eq("id", contact.id).eq("user_id", userId);
         continue;
       }
 
-      let bestSig = "";
+      const parses: SignatureParseResult[] = [];
       for (const msg of listData.messages.slice(0, 3)) {
         const msgRes = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}?format=full`, { headers: { Authorization: `Bearer ${accessToken}` } });
         const msgData = await msgRes.json();
-        const body = extractTextFromPayload(msgData.payload);
-        if (body) {
-          const sig = extractSignature(body);
-          if (sig.length > bestSig.length) bestSig = sig;
-        }
+        const headers = msgData.payload?.headers || [];
+        const from = parseAddress(headerValue(headers, "from"));
+        const bodies = extractBodiesFromPayload(msgData.payload);
+        parses.push(parseSenderSignature({
+          bodyText: bodies.text,
+          bodyHtml: bodies.html,
+          senderName: contact.full_name,
+          senderAliases: [from.name],
+          senderEmail: contact.email,
+          headers,
+          folder: "inbox",
+          internalEmployees: context.employees,
+          phonesOnOtherContacts: context.owners.filter((owner) => owner.contactId !== contact.id),
+        }));
         await new Promise(r => setTimeout(r, 50));
       }
 
-      const parsed = parseSignatureData(bestSig, contact);
-      const updatePayload: any = { signature_scanned_at: new Date().toISOString() };
-      if (Object.keys(parsed).length > 0) Object.assign(updatePayload, parsed);
+      const merged = mergeSignatureParses(parses);
+      const decision = signatureFieldUpdates(merged, contact);
+      const updatePayload: any = { signature_scanned_at: new Date().toISOString(), ...decision.updates };
 
       await supabase.from("tom_contacts").update(updatePayload).eq("id", contact.id).eq("user_id", userId);
-      if (Object.keys(parsed).length > 0) updated++;
+      if (Object.keys(decision.updates).length > 0) updated++;
+      await recordPhoneConflicts(userId, contact, decision.conflicts);
+
+      if (decision.googlePhones.length && contact.google_resource_name) {
+        try {
+          await updateGoogleContact(accessToken, contact.google_resource_name, {
+            phones: decision.googlePhones.map((phone) => ({ number: phone.number, googleType: phone.googleType })),
+          });
+        } catch (e) {
+          console.error(`Google phone append failed for ${contact.id}:`, e);
+        }
+      }
 
       await new Promise(r => setTimeout(r, 200));
     } catch (e) {
@@ -171,6 +180,7 @@ async function createContactsFromInbox(userId: string, accessToken: string) {
   const listData = await listRes.json();
   if (!listData.messages?.length) return { created: 0 };
 
+  const context = await loadSignatureContext(userId);
   let created = 0;
 
   for (const msg of listData.messages.slice(0, 50)) {
@@ -201,14 +211,9 @@ async function createContactsFromInbox(userId: string, accessToken: string) {
       const nameMatch = fromHeader.match(/^"?([^"<]+)"?\s*</);
       const fullName = nameMatch ? nameMatch[1].trim() : email.split("@")[0];
 
-  // Check if contact already exists
-      const { data: existing } = await supabase
-        .from("tom_contacts")
-        .select("id")
-        .eq("user_id", userId)
-        .ilike("email", email)
-        .maybeSingle();
-      if (existing) continue;
+      // A failed maybeSingle (email already on more than one row) must not create another.
+      const existing = await findContactsByEmail(supabase, userId, email);
+      if (insertDecision(existing) === "skip") continue;
 
       // Run blocklist + deleted guard
       const guard = await contactImportGuard(userId, email, fullName, "inbox_scan", { from: fromHeader });
@@ -220,21 +225,32 @@ async function createContactsFromInbox(userId: string, accessToken: string) {
         { headers: { Authorization: `Bearer ${accessToken}` } }
       );
       const fullMsg = await fullMsgRes.json();
-      const body = extractTextFromPayload(fullMsg.payload);
-      const sig = extractSignature(body);
-      const sigData = parseSignatureData(sig, {});
+      const fullHeaders = fullMsg.payload?.headers || [];
+      const bodies = extractBodiesFromPayload(fullMsg.payload);
+      const sigData = signatureFieldUpdates(parseSenderSignature({
+        bodyText: bodies.text,
+        bodyHtml: bodies.html,
+        senderName: fullName,
+        senderEmail: email,
+        headers: fullHeaders,
+        folder: "inbox",
+        internalEmployees: context.employees,
+        phonesOnOtherContacts: context.owners,
+      }), {});
 
       // Create the contact
       const { data: newContact } = await supabase
         .from("tom_contacts")
         .insert({
           user_id: userId,
-          full_name: sigData.full_name || fullName,
+          full_name: fullName,
           email: email,
-          phone: sigData.phone || null,
-          job_title: sigData.job_title || null,
-          company: sigData.company || null,
-          linkedin_url: sigData.linkedin_url || null,
+          phone: sigData.updates.phone || null,
+          phones: sigData.updates.phones || null,
+          all_phones: sigData.updates.all_phones || null,
+          job_title: sigData.updates.job_title || null,
+          company: sigData.updates.company || null,
+          linkedin_url: sigData.updates.linkedin_url || null,
           signature_scanned_at: new Date().toISOString(),
           last_synced_at: new Date().toISOString(),
         })
@@ -242,6 +258,7 @@ async function createContactsFromInbox(userId: string, accessToken: string) {
         .single();
 
       if (newContact) {
+        await recordPhoneConflicts(userId, newContact, sigData.conflicts);
         // Also create in Google Contacts
         try {
           const gToken = accessToken;
@@ -249,6 +266,7 @@ async function createContactsFromInbox(userId: string, accessToken: string) {
             full_name: newContact.full_name,
             email: newContact.email,
             phone: newContact.phone,
+            phones: sigData.googlePhones,
             company: newContact.company,
             job_title: newContact.job_title,
           });
