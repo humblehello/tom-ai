@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test:signatures": "tsx --test app/lib/signature-parser.test.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.91.1",
@@ -27,6 +28,7 @@
     "eslint": "^9",
     "eslint-config-next": "16.1.6",
     "tailwindcss": "^4",
+    "tsx": "^4.23.15",
     "typescript": "^5"
   }
 }

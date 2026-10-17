@@ -5,6 +5,7 @@ import { createClient } from "@supabase/supabase-js";
 import { createGoogleContact } from "../../../lib/googleContacts";
 import { getValidAccessToken } from "../../../lib/google";
 import { inngest } from "../../../lib/inngest";
+import { findContactsByEmail, findContactsByName } from "../../../lib/contact-dedupe";
 
 export const maxDuration = 60;
 
@@ -167,15 +168,12 @@ async function saveContact(contact: any, userId: string, accessToken: string | n
   if (!contact.full_name?.trim()) return "skipped";
 
   try {
-// Check for existing contact — merge if found
-    let existingId: string | null = null;
+    // Check for existing contact — merge if found.
+    // An ambiguous or failed lookup must not insert another copy.
     if (contact.email) {
-      const { data: existing } = await supabase
-        .from("tom_contacts")
-        .select("id, phone, company, job_title, birthday, home_address")
-        .eq("user_id", userId)
-        .ilike("email", contact.email.trim())
-        .maybeSingle();
+      const found = await findContactsByEmail(supabase, userId, contact.email.trim());
+      if (found.status === "many" || found.status === "error") return "skipped";
+      const existing = found.status === "one" ? found.contact : null;
 
       if (existing) {
         // Merge — fill in missing fields only
@@ -194,16 +192,10 @@ async function saveContact(contact: any, userId: string, accessToken: string | n
       }
     }
 
-    // Deduplicate by name if no email
+    // Deduplicate by name if no email. Two existing rows means "already stored", not "insert a third".
     if (!contact.email) {
-      const { data: existing } = await supabase
-        .from("tom_contacts")
-        .select("id")
-        .eq("user_id", userId)
-        .ilike("full_name", contact.full_name.trim())
-        .maybeSingle();
-
-      if (existing) return "skipped";
+      const found = await findContactsByName(supabase, userId, contact.full_name.trim());
+      if (found.status !== "none") return "skipped";
     }
 
     // Insert to Supabase

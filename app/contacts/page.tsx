@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState, useRef, useCallback } from "react";
 import { useRouter } from "next/navigation";
+import { phoneDisplayIcon, phoneDisplayLabel } from "@/app/lib/phone-label";
 import { C, font } from "@/app/lib/theme";
 import Sidebar from "@/app/components/Sidebar";
 import HopperSmartImport from "@/app/components/HopperSmartImport";
@@ -45,7 +46,7 @@ type Contact = {
   card_eligible?: boolean;
   all_emails?: string[];
   all_phones?: string[];
-  phones?: { number: string; type: "cell" | "work" | "home"; primary?: boolean }[];
+  phones?: { number: string; type: "cell" | "work" | "home"; label?: string; primary?: boolean }[];
   linkedin_url?: string;
   twitter_url?: string;
   instagram_url?: string;
@@ -617,15 +618,13 @@ function ContactCard({ contact, onClick, onReach, onEdit, onDelete, allContacts,
   const phonesToShow = contact.phones?.length
     ? contact.phones.slice(0, 2)
     : contact.phone ? [{ number: contact.phone, type: "cell" }] : [];
-  const typeIcon = (t: string) => t === "cell" ? "📱" : t === "work" ? "☎️" : "🏠";
-  const typeLabel = (t: string) => t === "cell" ? "cell" : t === "work" ? "work" : "home";
   return phonesToShow.map((p, i) => (
     <div key={i} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11 }}>
       <span onClick={e => { e.stopPropagation(); window.open(`tel:${p.number}`); }} style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
-        <span style={{ color: C.text4 }}>{typeIcon(p.type)}</span>
+        <span style={{ color: C.text4 }}>{phoneDisplayIcon(p)}</span>
         <span style={{ color: C.blue }}>{fmtPhone(p.number)}</span>
       </span>
-      <span style={{ fontSize: 9, color: C.text4, fontWeight: 600 }}>{typeLabel(p.type)}</span>
+      <span style={{ fontSize: 9, color: C.text4, fontWeight: 600 }}>{phoneDisplayLabel(p)}</span>
     </div>
   ));
 })()}

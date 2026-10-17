@@ -1,4 +1,18 @@
+import { googlePhoneType } from "./phone-label";
+
 const PEOPLE_API = "https://people.googleapis.com/v1";
+
+function phoneDigits(value: string | null | undefined): string {
+  const digits = (value || "").replace(/\D/g, "");
+  return digits.length === 11 && digits.startsWith("1") ? digits.slice(1) : digits;
+}
+
+export interface GooglePhoneInput {
+  number: string;
+  googleType?: string | null;
+  label?: string | null;
+  type?: string | null;
+}
 
 // ── Get a contact's Google resource name by email ──
 export async function findGoogleContact(accessToken: string, email: string): Promise<string | null> {
@@ -50,6 +64,7 @@ export async function updateGoogleContact(
   resourceName: string,
   updates: {
     phone?: string | null;
+    phones?: GooglePhoneInput[] | null;
     address?: any | null;
     work_address?: any | null;
     birthday?: string | null;
@@ -78,13 +93,30 @@ export async function updateGoogleContact(
     }
 
     // ── Phone ──
-    if (updates.phone === null) {
+    // A typed list appends each number with its own label and never replaces
+    // a number already on the Google contact. The single `phone` field stays
+    // a mobile append for older callers.
+    if (updates.phones) {
+      const existing = current.phoneNumbers || [];
+      const existingDigits = new Set(existing.map((p: any) => phoneDigits(p.value)));
+      const additions = updates.phones.filter((phone) => phone.number && !existingDigits.has(phoneDigits(phone.number)));
+      if (additions.length > 0) {
+        body.phoneNumbers = [
+          ...existing,
+          ...additions.map((phone) => ({
+            value: phone.number,
+            type: phone.googleType || googlePhoneType(phone.label || phone.type),
+          })),
+        ];
+        personFields.push("phoneNumbers");
+      }
+    } else if (updates.phone === null) {
       // Explicit deletion — clear all phone numbers
       body.phoneNumbers = [];
       personFields.push("phoneNumbers");
     } else if (updates.phone) {
       const existing = current.phoneNumbers || [];
-      const alreadyHas = existing.some((p: any) => p.value === updates.phone);
+      const alreadyHas = existing.some((p: any) => phoneDigits(p.value) === phoneDigits(updates.phone));
       if (!alreadyHas) {
         body.phoneNumbers = [...existing, { value: updates.phone, type: "mobile" }];
         personFields.push("phoneNumbers");
@@ -330,6 +362,7 @@ export async function createGoogleContact(
     full_name: string;
     email?: string | null;
     phone?: string | null;
+    phones?: GooglePhoneInput[] | null;
     address?: any;
     company?: string | null;
     job_title?: string | null;
@@ -347,7 +380,14 @@ export async function createGoogleContact(
     if (contact.email) {
       body.emailAddresses = [{ value: contact.email, type: "work" }];
     }
-    if (contact.phone) {
+    if (contact.phones?.length) {
+      body.phoneNumbers = contact.phones
+        .filter((phone) => phone.number)
+        .map((phone) => ({
+          value: phone.number,
+          type: phone.googleType || googlePhoneType(phone.label || phone.type),
+        }));
+    } else if (contact.phone) {
       body.phoneNumbers = [{ value: contact.phone, type: "mobile" }];
     }
     if (contact.address?.streetAddress) {

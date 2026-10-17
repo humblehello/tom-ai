@@ -3,6 +3,18 @@ import { cookies } from "next/headers";
 import { createClient } from "@supabase/supabase-js";
 import { updateGoogleContact, createGoogleContact } from "../../../lib/googleContacts";
 import { isBlockedEmail } from "@/app/lib/contact-blocklist";
+import { findContactsByEmail, findContactsByName } from "../../../lib/contact-dedupe";
+import {
+  collectPhoneOwners,
+  extractBodiesFromPayload,
+  internalEmployeesFromContacts,
+  isAutoReply,
+  mergeSignatureParses,
+  parseAddress,
+  parseSenderSignature,
+  signatureFieldUpdates,
+  type SignatureParseResult,
+} from "../../../lib/signature-parser";
 
 // Local-part blocklist moved to app/lib/contact-blocklist.ts (substring match, 2026-05-10)
 // Domain blocklist kept inline — these are sending-infrastructure domains, not local-part keywords
@@ -110,33 +122,36 @@ export async function POST(req: NextRequest) {
         const from = headers.find((h: any) => h.name === "From")?.value || "";
         const to = headers.find((h: any) => h.name === "To")?.value || "";
         const date = headers.find((h: any) => h.name === "Date")?.value || "";
-
-        const extractBody = (part: any): string => {
-          if (!part) return "";
-          if (part.mimeType === "text/plain" && part.body?.data) {
-            return Buffer.from(part.body.data, "base64").toString("utf-8");
-          }
-          if (part.parts) return part.parts.map(extractBody).join("\n");
-          return "";
-        };
-
-        // Only take the first ~800 chars of body to avoid pulling in
-        // quoted replies and other people's signatures
-        const fullBody = extractBody(data.payload);
-        const firstReplyBreak = fullBody.search(/\n[-_]{3,}|\nOn .+ wrote:|\n>+\s/);
-        const bodySnippet = firstReplyBreak > 0
-          ? fullBody.slice(0, Math.min(firstReplyBreak, 800))
-          : fullBody.slice(0, 800);
+        const bodies = extractBodiesFromPayload(data.payload);
+        const sender = parseAddress(from);
+        const autoReply = isAutoReply({ headers, subject });
+        // Sent mail signatures belong to the account owner, never the recipient.
+        // Auto-replies are ignored. Quoted and forwarded text is removed either way.
+        let body = "";
+        if (msg.folder !== "sent" && !autoReply) {
+          const stripped = parseSenderSignature({
+            bodyText: bodies.text,
+            bodyHtml: bodies.html,
+            senderName: sender.name,
+            senderEmail: sender.email,
+            headers,
+            folder: "inbox",
+          });
+          body = (stripped.newContent || "").slice(0, 800);
+        }
 
         return {
           subject,
           from,
           to,
           date,
+          headers,
           folder: msg.folder,
-          // Only include the top of the email — not the quoted thread
-          body: bodySnippet,
-          // Track the primary sender email for phone attribution
+          autoReply,
+          text: bodies.text,
+          html: bodies.html,
+          // Only the sender's new content — not the quoted thread
+          body,
           primary_sender_email: extractEmailAddress(from),
         };
       })
@@ -248,8 +263,30 @@ ${e.body}
     // ── Step 5: Check existing contacts for deletion suggestions ──
     const { data: allContacts } = await supabase
       .from("tom_contacts")
-      .select("id, full_name, email, last_emailed_at, deletion_suggested")
+      .select("id, full_name, email, all_emails, phone, phones, all_phones, last_emailed_at, deletion_suggested")
       .eq("user_id", effectiveUserId);
+
+    const internalEmployees = internalEmployeesFromContacts(allContacts || []);
+    const phoneOwners = collectPhoneOwners(allContacts || []);
+    const parsesBySender = new Map<string, SignatureParseResult[]>();
+    for (const email of emailDetails) {
+      if (email.folder === "sent" || email.autoReply || !email.primary_sender_email) continue;
+      const sender = parseAddress(email.from);
+      const parsed = parseSenderSignature({
+        bodyText: email.text,
+        bodyHtml: email.html,
+        senderName: sender.name,
+        senderEmail: email.primary_sender_email,
+        headers: email.headers,
+        folder: "inbox",
+        subject: email.subject,
+        internalEmployees,
+        phonesOnOtherContacts: phoneOwners.filter((owner) => (owner.email || "").toLowerCase() !== email.primary_sender_email),
+      });
+      const list = parsesBySender.get(email.primary_sender_email) || [];
+      list.push(parsed);
+      parsesBySender.set(email.primary_sender_email, list);
+    }
 
     let deletionSuggestions = 0;
 
@@ -296,32 +333,27 @@ ${e.body}
       const lastEmailDate = emailDates[personEmail] || new Date().toISOString();
       const emailCount = emailCounts[personEmail] || 1;
 
-      // ── Phone validation: only trust phone if it came from this person's own email ──
-      // Check that at least one email in our set had this person as the FROM sender
-      const personWasSender = emailDetails.some(e => e.primary_sender_email === personEmail);
-      const trustedPhone = personWasSender ? person.phone : null;
+      // Phones come from the sender's own signature, never from the model and never from sent mail.
+      const personWasSender = emailDetails.some(e => e.folder !== "sent" && !e.autoReply && e.primary_sender_email === personEmail);
 
-      // Try to find existing contact by email then name
-      let contact = null;
+      // Try to find existing contact by email then name.
+      // An ambiguous lookup must not insert another row for the same person.
+      let contact: any = null;
 
-      const { data: byEmail } = await supabase
-        .from("tom_contacts")
-        .select("*")
-        .eq("user_id", effectiveUserId)
-        .ilike("email", personEmail)
-        .single();
-      contact = byEmail;
+      const byEmail = await findContactsByEmail(supabase, effectiveUserId, personEmail, "*");
+      if (byEmail.status === "one") contact = byEmail.contact;
+      else if (byEmail.status === "many" || byEmail.status === "error") continue;
 
       if (!contact) {
-        const { data: byName } = await supabase
-          .from("tom_contacts")
-          .select("*")
-          .eq("user_id", effectiveUserId)
-          .ilike("full_name", person.full_name)
-          .limit(1)
-          .single();
-        contact = byName;
+        const byName = await findContactsByName(supabase, effectiveUserId, person.full_name, "*");
+        if (byName.status === "one") contact = byName.contact;
+        else if (byName.status === "many" || byName.status === "error") continue;
       }
+
+      const signatureDecision = signatureFieldUpdates(
+        mergeSignatureParses(parsesBySender.get(personEmail) || []),
+        contact || {}
+      );
 
       if (!contact) {
         // ── New contact — must pass ALL quality gates ──
@@ -338,7 +370,9 @@ ${e.body}
             google_contact_id: `email_scrape_${Date.now()}_${Math.random()}`,
             full_name: person.full_name,
             email: personEmail,
-            phone: trustedPhone || null,  // only set if we trust the attribution
+            phone: signatureDecision.updates.phone || null,
+            phones: signatureDecision.updates.phones || null,
+            all_phones: signatureDecision.updates.all_phones || null,
             home_address: person.address || null,
             last_emailed_at: lastEmailDate,
             email_count: emailCount,
@@ -351,7 +385,8 @@ ${e.body}
           const googleResourceName = await createGoogleContact(user.access_token, {
             full_name: person.full_name,
             email: personEmail,
-            phone: trustedPhone,
+            phone: signatureDecision.updates.phone || null,
+            phones: signatureDecision.googlePhones,
             address: person.address,
           });
 
@@ -374,6 +409,20 @@ ${e.body}
             email_from: person.source_email_from,
           });
 
+          for (const conflict of signatureDecision.conflicts) {
+            await supabase.from("tom_contact_updates").insert({
+              user_id: effectiveUserId,
+              contact_id: newContact.id,
+              contact_name: person.full_name,
+              field_updated: "phone_conflict",
+              old_value: null,
+              new_value: `${conflict.number} [${conflict.kind}] ${conflict.detail}`.slice(0, 500),
+              source: "signature_parse",
+              email_subject: person.source_subject,
+              email_from: person.source_email_from,
+            });
+          }
+
           newCount++;
         }
         continue;
@@ -383,12 +432,20 @@ ${e.body}
       const updates: Record<string, any> = {};
       const logs: any[] = [];
 
-      // Only update phone if:
-      // 1. Contact doesn't already have one
-      // 2. We trust the attribution (person was the actual sender)
-      if (trustedPhone && !contact.phone) {
-        updates.phone = trustedPhone;
-        logs.push({ field_updated: "phone", old_value: null, new_value: trustedPhone });
+      if (signatureDecision.updates.phone) {
+        updates.phone = signatureDecision.updates.phone;
+        logs.push({ field_updated: "phone", old_value: contact.phone || null, new_value: signatureDecision.updates.phone });
+      }
+      if (signatureDecision.updates.phones) {
+        updates.phones = signatureDecision.updates.phones;
+        updates.all_phones = signatureDecision.updates.all_phones;
+      }
+      for (const conflict of signatureDecision.conflicts) {
+        logs.push({
+          field_updated: "phone_conflict",
+          old_value: contact.phone || null,
+          new_value: `${conflict.number} [${conflict.kind}] ${conflict.detail}`.slice(0, 500),
+        });
       }
 
       if (person.email && !contact.email) {
@@ -438,7 +495,8 @@ ${e.body}
         !contact.google_contact_id.startsWith("email_scrape_")
       ) {
         await updateGoogleContact(user.access_token, contact.google_contact_id, {
-          phone: updates.phone,
+          phones: signatureDecision.googlePhones.length ? signatureDecision.googlePhones : undefined,
+          phone: signatureDecision.googlePhones.length ? undefined : updates.phone,
           address: updates.home_address,
         });
       }
