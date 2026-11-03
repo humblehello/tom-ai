@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { easternHour, isContactJobWindow } from "./contact-job-schedule";
-import { isAutoReplyTemplate, matchingAutoReplyTemplate } from "./auto-reply-templates";
+import { ARF_DONATION_PHRASES, BUYER_INVESTOR_QUALIFIER_PHRASES, isAutoReplyTemplate, matchingAutoReplyTemplate } from "./auto-reply-templates";
 import { isEspDomain, isRoleAddress, screenInboundSender } from "./inbound-screen";
 import { planCursorWrite, planSyncRequest } from "./google-sync-cursor";
 import { buildCleanupReport, isSafeAutoMerge, parseApprovedActions } from "./cleanup-report";
@@ -20,17 +20,27 @@ describe("contact job window", () => {
   });
 });
 
+const ARF_REPLY = ARF_DONATION_PHRASES.join("\n\n");
+const QUALIFIER_REPLY = BUYER_INVESTOR_QUALIFIER_PHRASES.join("\n\n");
+
 describe("auto reply templates", () => {
-  it("matches the ARF donation reply and not a scarf mention", () => {
-    const arf = "Hi — a $500 donation to ARF, the animal rescue fund, is how I handle cold pitches.";
-    assert.equal(matchingAutoReplyTemplate(arf)?.id, "arf_donation");
-    assert.equal(isAutoReplyTemplate("Your scarf donation drive looks great."), false);
+  it("matches the ARF donation reply, including a quoted and wrapped copy", () => {
+    assert.equal(matchingAutoReplyTemplate(ARF_REPLY)?.id, "arf_donation");
+    const quoted = ARF_REPLY
+      .split("\n")
+      .map((line) => `> ${line}`)
+      .join("\n")
+      .replace("Muncie, Indiana", "Muncie,\n> Indiana")
+      .replace("here's", "here’s");
+    assert.equal(matchingAutoReplyTemplate(quoted)?.id, "arf_donation");
+    assert.equal(isAutoReplyTemplate("Your scarf donation drive looks great. See munciearf.com someday."), false);
     assert.equal(isAutoReplyTemplate("Can we grab coffee next week?"), false);
   });
 
-  it("matches the buyer qualifier only when both ideas are present", () => {
-    const qualifier = "Before I reply: are you a qualified buyer or investor for this acquisition?";
-    assert.equal(matchingAutoReplyTemplate(qualifier)?.id, "buyer_investor_qualifier");
+  it("matches the buyer qualifier and ignores a normal note that mentions a buyer", () => {
+    assert.equal(matchingAutoReplyTemplate(QUALIFIER_REPLY)?.id, "buyer_investor_qualifier");
+    const html = `<p>${BUYER_INVESTOR_QUALIFIER_PHRASES.join("</p><p>")}</p>`.replace("I'm", "I’m");
+    assert.equal(matchingAutoReplyTemplate(html)?.id, "buyer_investor_qualifier");
     assert.equal(isAutoReplyTemplate("Thanks, I am the buyer. Let's talk Tuesday."), false);
   });
 });
@@ -60,7 +70,7 @@ describe("inbound screen", () => {
     const decision = screenInboundSender({
       email: "pitch@prospect.com",
       sentMessages: [{
-        body: "Please make a $500 donation to ARF animal rescue instead of pitching me.",
+        body: ARF_REPLY,
         date: "2026-11-01T15:00:00Z",
       }],
       inboundDate: "2026-11-01T14:00:00Z",
