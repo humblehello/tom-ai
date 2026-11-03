@@ -2,8 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createClient } from "@supabase/supabase-js";
 import crypto from "crypto";
-import { buildVerificationEmail } from "../../../lib/email-template";
+import { buildVerificationEmail, buildVerificationText } from "../../../lib/email-template";
 import { sendUserEmail } from "../../../lib/email-provider";
+import { checkVerificationSafety } from "../../../lib/verification-safety";
 
 const DAILY_SEND_LIMIT = 20;
 const DAILY_COLD_LIMIT = 5;
@@ -16,48 +17,20 @@ const LOCK_AFTER_VERIFIED_MONTHS = 18;
 const REENROLL_AFTER_MONTHS = 12;
 const MAX_ATTEMPTS = 3;
 
-const EMAIL_SUBJECTS = [
-  "Verifying Contact Info",
-  "Verifying Contact Details",
-  "Can you confirm contact details?",
-  "Do I have your correct contact info?",
-  "Making Sure I Have Your Most Up To Date Info",
-  "Confirm your contact info?",
-  "Quick check - Do I have your contact info right?",
-  "Is your contact info current?",
-];
+const PRIMARY_NOTE =
+  "I'm going through the people I want to stay in touch with, and I want to be sure I still have the right details for you. If anything below is off, just reply to this email and tell me. Or tap the button if that's easier.";
 
-const EMAIL_SUBJECTS_ATTEMPT_2 = [
-  "Following up on my contact info request",
-  "Just checking in — do I have your info right?",
-  "One more check on your contact details",
-  "Still hoping to confirm your info",
-];
+const FOLLOWUP_NOTE =
+  "I sent a short note earlier to check the details I have for you. Whenever you have a second, a reply is perfect — or use the button if you'd rather edit them yourself.";
 
-const EMAIL_OPENERS = [
-  "I'm using Humble Hello to do a quick cleanup on my contacts and want to make sure I've got your info right. Would you mind taking 30 seconds to confirm or fix it?",
-  "I'm updating my contact records using Humble Hello, and want to be sure I've got the right details for you. Can you take 30 seconds to confirm?",
-  "I'm using Humble Hello to make sure my contacts are clean and accurate — can you take 30 seconds to confirm your details?",
-  "I'm using Humble Hello to take a fresh look at how I stay connected — can you take 30 seconds to confirm your contact details so I get it right?",
-  "I want to make sure I have your contact details right — can you take 30 seconds to confirm?",
-  "I might have outdated info for you — can you take 30 seconds to confirm or fix it?",
-  "I realized I might be working off old info for you — can you take 30 seconds to make sure I've got it right?",
-];
-
-const EMAIL_OPENERS_ATTEMPT_2 = [
-  "I sent a quick note a few weeks ago about confirming your contact info — I still want to make sure I have it right. Would you mind taking 30 seconds?",
-  "Following up on my earlier request — I just want to make sure I have your most current details. Takes about 30 seconds.",
-  "I know you're busy, but I'd love to make sure I have your current info. Just 30 seconds if you have a moment.",
-];
-
-function getRandomSubject(attempt: number): string {
-  const subjects = attempt >= 2 ? EMAIL_SUBJECTS_ATTEMPT_2 : EMAIL_SUBJECTS;
-  return subjects[Math.floor(Math.random() * subjects.length)];
+function verificationSubject(senderFullName: string, attempt: number): string {
+  const name = senderFullName.trim();
+  const base = name ? `${name}: is this still your info?` : "Is this still your info?";
+  return attempt >= 2 ? `Re: ${base}` : base;
 }
 
-function getRandomOpener(attempt: number): string {
-  const openers = attempt >= 2 ? EMAIL_OPENERS_ATTEMPT_2 : EMAIL_OPENERS;
-  return openers[Math.floor(Math.random() * openers.length)];
+function verificationOpener(attempt: number): string {
+  return attempt >= 2 ? FOLLOWUP_NOTE : PRIMARY_NOTE;
 }
 
 function sleep(ms: number) {
@@ -137,6 +110,22 @@ export async function POST(req: NextRequest) {
 
   if (!user) return NextResponse.json({ error: "User not found" }, { status: 404 });
 
+  if (!draftOnly) {
+    const safety = await checkVerificationSafety(userId);
+    if (safety.paused) {
+      return NextResponse.json({
+        success: false,
+        sent: 0,
+        drafted: 0,
+        skipped: 0,
+        error: "paused_due_to_bounces",
+        reason: safety.reason,
+        until: safety.until,
+        message: safety.reason,
+      }, { status: 423 });
+    }
+  }
+
   // Check daily quota
   const todayStart = new Date();
   todayStart.setHours(0, 0, 0, 0);
@@ -196,7 +185,8 @@ export async function POST(req: NextRequest) {
 
     const shuffled = (data || []).sort(() => Math.random() - 0.5);
     const targetCount = Math.min(batch_size || remainingQuota, remainingQuota);
-    contacts = shuffled.slice(0, targetCount * 3);
+    const warm = shuffled.filter((contact) => contact.email_count && contact.email_count >= 1);
+    contacts = warm.slice(0, targetCount * 3);
   }
 
   if (!contacts?.length) {
@@ -238,9 +228,18 @@ export async function POST(req: NextRequest) {
     }
 
     const currentAttempt = (contact.verification_attempts || 0) + 1;
-    const token = crypto.randomBytes(32).toString("hex");
-    const verifyUrl = `${appUrl}/verify/${token}`;
     const isCold = !contact.email_count || contact.email_count < 1;
+    const isAutomated = !contactIds?.length;
+
+    if (isAutomated && isCold) {
+      skipped++;
+      skipReasons.push({
+        contact_id: contact.id,
+        contact_name: contact.full_name,
+        reason: "no prior email history — automated verification skipped",
+      });
+      continue;
+    }
 
     if (isCold && remainingColdQuota <= 0) {
       skipped++;
@@ -252,10 +251,12 @@ export async function POST(req: NextRequest) {
       continue;
     }
 
+    const token = crypto.randomBytes(32).toString("hex");
+    const verifyUrl = `${appUrl}/verify/${token}`;
     const shouldAutoSend = !draftOnly;
     const contactFirstName = contact.full_name?.split(" ")[0] || "there";
-    const emailSubject = getRandomSubject(currentAttempt);
-    const emailOpener = getRandomOpener(currentAttempt);
+    const emailSubject = verificationSubject(senderFullName, currentAttempt);
+    const emailOpener = verificationOpener(currentAttempt);
 
     const nextEligible = new Date();
     if (currentAttempt === 1) {
@@ -278,26 +279,15 @@ export async function POST(req: NextRequest) {
       opener: emailOpener,
     });
 
-    const textBody = `Hi ${contactFirstName},
-
-${emailOpener}
-
-${verifyUrl}
-
-You'll be able to review and update:
-- Home & work address
-- Mobile number
-- Birthday
-- Title & company
-
-If you'd rather be removed from my list entirely, there's an option for that too.
-
-Thank you!
-
-${senderFirstName}
-
---
-Sent via Humble Hello (${appUrl})`;
+    const textBody = buildVerificationText({
+      contactFirstName,
+      senderFirstName,
+      senderFullName,
+      verifyUrl,
+      appUrl,
+      contact,
+      opener: emailOpener,
+    });
 
     await supabase.from("tom_verifications").insert({
       user_id: userId,

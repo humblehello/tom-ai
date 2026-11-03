@@ -100,6 +100,8 @@ export async function sendUserEmail(params: SendEmailParams): Promise<void> {
       html: htmlBody,
       text: textBody,
       replyTo: params.replyTo,
+      fromName: params.fromName ?? config.userName ?? undefined,
+      fromEmail: config.microsoftEmail ?? undefined,
     });
     return;
   }
@@ -148,14 +150,14 @@ async function sendGmail(params: GmailSendParams): Promise<void> {
     : null;
 
   const fromHeader = params.fromName
-    ? `${params.fromName} <${params.fromEmail}>`
+    ? `${encodeDisplayName(params.fromName)} <${params.fromEmail}>`
     : params.fromEmail;
 
   const boundary = 'boundary_' + Date.now();
   const headers: string[] = [
     `To: ${toList}`,
     `From: ${fromHeader}`,
-    `Subject: ${params.subject}`,
+    `Subject: ${encodeMimeHeader(params.subject)}`,
     'MIME-Version: 1.0',
     `Content-Type: multipart/alternative; boundary="${boundary}"`,
   ];
@@ -174,7 +176,7 @@ async function sendGmail(params: GmailSendParams): Promise<void> {
     `--${boundary}`,
     'Content-Type: text/html; charset=utf-8',
     '',
-    `<!DOCTYPE html><html><body style="font-family: sans-serif; font-size: 14px; color: #333;">${params.htmlBody}</body></html>`,
+    ensureHtmlDocument(params.htmlBody),
     '',
     `--${boundary}--`,
   ].join('\r\n');
@@ -202,6 +204,27 @@ async function sendGmail(params: GmailSendParams): Promise<void> {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+function ensureHtmlDocument(html: string): string {
+  const trimmed = html.trimStart();
+  if (/^<!DOCTYPE\s+html/i.test(trimmed) || /^<html[\s>]/i.test(trimmed)) {
+    return html;
+  }
+  return `<!DOCTYPE html><html><body style="font-family: sans-serif; font-size: 14px; color: #333;">${html}</body></html>`;
+}
+
+function encodeMimeHeader(value: string): string {
+  if (/^[\t\x20-\x7E]*$/.test(value)) return value;
+  return `=?UTF-8?B?${Buffer.from(value, 'utf8').toString('base64')}?=`;
+}
+
+function encodeDisplayName(name: string): string {
+  if (/[^\t\x20-\x7E]/.test(name)) return encodeMimeHeader(name);
+  if (/["\\,;<>]/.test(name)) {
+    return `"${name.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+  }
+  return name;
+}
 
 function plainTextToHtml(text: string): string {
   return text

@@ -2,13 +2,11 @@ import { NextRequest, NextResponse } from "next/server";
 import { cookies } from "next/headers";
 import { createClient } from "@supabase/supabase-js";
 import { updateGoogleContact, deleteGoogleContact } from "../../../../lib/googleContacts";
-
-const OPT_OUT_PHRASES = [
-  "remove me", "don't know you", "do not know you", "i don't know you",
-  "delete me", "unsubscribe", "who are you", "wrong person",
-  "remove my info", "delete my info", "stop emailing", "leave me alone",
-  "not interested", "please remove",
-];
+import {
+  interpretVerificationReply,
+  normalizeModelUpdates,
+  type VerificationUpdates,
+} from "../../../../lib/verification-reply";
 
 export async function POST(req: NextRequest) {
   const supabase = createClient(
@@ -196,24 +194,22 @@ const gmailRes = await fetch(
     );
     if (!verification) continue;
 
-    // Extract email body
-    const bodyText = extractBody(data.payload).toLowerCase();
+    const replyText = extractBody(data.payload);
+    const interpreted = interpretVerificationReply(replyText);
+    const contact = verification.tom_contacts;
+    if (!contact?.id) continue;
 
-    // Check for opt-out
-    const isOptOut = OPT_OUT_PHRASES.some(phrase => bodyText.includes(phrase));
-
-    if (isOptOut) {
-      const contact = verification.tom_contacts;
-
-      // Delete from Google Contacts
-      if (contact.google_contact_id && !contact.google_contact_id.startsWith("email_scrape_")) {
-        await deleteGoogleContact(user.access_token, contact.google_contact_id);
+    if (interpreted.kind === "opt_out") {
+      const resource = googleResourceName(contact);
+      if (resource) {
+        try {
+          await deleteGoogleContact(user.access_token, resource);
+        } catch (err) {
+          console.error("[verify-parse] google delete failed:", err);
+        }
       }
 
-      // Delete from Supabase
       await supabase.from("tom_contacts").delete().eq("id", contact.id);
-
-      // Update verification status
       await supabase
         .from("tom_verifications")
         .update({
@@ -224,73 +220,107 @@ const gmailRes = await fetch(
         .eq("id", verification.id);
 
       optedOut++;
+    } else if (interpreted.kind === "soft_opt_out") {
+      await supabase
+        .from("tom_contacts")
+        .update({
+          verification_status: "opted_out",
+          verification_next_eligible_at: verificationLockDate(),
+          verification_sequence_reset_at: null,
+        })
+        .eq("id", contact.id);
+      await supabase
+        .from("tom_verifications")
+        .update({
+          status: "opted_out",
+          responded_at: new Date().toISOString(),
+          response_type: "stop_emails",
+        })
+        .eq("id", verification.id);
+
+      optedOut++;
     } else {
-      // Use Claude to extract updated info from the reply
-      const claudeRes = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": process.env.ANTHROPIC_API_KEY!,
-          "anthropic-version": "2023-06-01",
-        },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
-          max_tokens: 500,
-          messages: [{
-            role: "user",
-            content: `Extract updated contact information from this email reply. Return ONLY a JSON object with any fields mentioned. Fields: home_address (with streetAddress, city, state, zip), work_address, phone, birthday, title, company. Only include fields explicitly mentioned. Return {} if nothing clear.
-
-Email: ${bodyText.slice(0, 1000)}`,
-          }],
-        }),
-      });
-
-      const claudeData = await claudeRes.json();
-      const rawText = claudeData.content?.[0]?.text || "{}";
-
-      let extractedUpdates: any = {};
-      try {
-        extractedUpdates = JSON.parse(rawText.replace(/```json|```/g, "").trim());
-      } catch {
-        extractedUpdates = {};
+      let updates: VerificationUpdates = { ...(interpreted.updates || {}) };
+      if (interpreted.kind === "none" || interpreted.mentionsUnparsed) {
+        const modeled = await extractReplyWithModel(interpreted.text);
+        updates = { ...modeled, ...updates };
       }
 
-      if (Object.keys(extractedUpdates).length > 0) {
-        const contact = verification.tom_contacts;
-        const contactUpdates: Record<string, any> = {
+      if (hasVerificationUpdates(updates)) {
+        const contactUpdates: {
+          verified_at: string;
+          verification_status: string;
+          verification_next_eligible_at: string;
+          verification_sequence_reset_at: null;
+          verification_attempts: number;
+          home_address?: VerificationUpdates["home_address"];
+          work_address?: VerificationUpdates["work_address"];
+          phone?: string;
+          birthday?: string;
+          job_title?: string;
+          company?: string;
+        } = {
           verified_at: new Date().toISOString(),
           verification_status: "verified",
+          verification_next_eligible_at: verificationLockDate(),
+          verification_sequence_reset_at: null,
+          verification_attempts: 0,
         };
+        if (updates.home_address) contactUpdates.home_address = updates.home_address;
+        if (updates.work_address) contactUpdates.work_address = updates.work_address;
+        if (updates.phone) contactUpdates.phone = updates.phone;
+        if (updates.birthday) contactUpdates.birthday = updates.birthday;
+        if (updates.job_title) contactUpdates.job_title = updates.job_title;
+        if (updates.company) contactUpdates.company = updates.company;
 
-        if (extractedUpdates.home_address?.streetAddress) contactUpdates.home_address = extractedUpdates.home_address;
-        if (extractedUpdates.work_address?.streetAddress) contactUpdates.work_address = extractedUpdates.work_address;
-        if (extractedUpdates.phone) contactUpdates.phone = extractedUpdates.phone;
-        if (extractedUpdates.birthday) contactUpdates.birthday = extractedUpdates.birthday;
-        if (extractedUpdates.title) contactUpdates.title = extractedUpdates.title;
-        if (extractedUpdates.company) contactUpdates.company = extractedUpdates.company;
-
-        // Update Supabase
         await supabase.from("tom_contacts").update(contactUpdates).eq("id", contact.id);
 
-        // Update Google Contacts
-        if (contact.google_contact_id && !contact.google_contact_id.startsWith("email_scrape_")) {
-          await updateGoogleContact(user.access_token, contact.google_contact_id, {
-            phone: extractedUpdates.phone,
-            address: extractedUpdates.home_address,
-          });
+        const resource = googleResourceName(contact);
+        if (resource) {
+          try {
+            await updateGoogleContact(user.access_token, resource, {
+              phone: updates.phone,
+              address: updates.home_address,
+              work_address: updates.work_address,
+              birthday: updates.birthday,
+              job_title: updates.job_title,
+              company: updates.company,
+            });
+          } catch (err) {
+            console.error("[verify-parse] google update failed:", err);
+          }
         }
 
-        // Mark verification complete
         await supabase
           .from("tom_verifications")
           .update({
             status: "completed",
             responded_at: new Date().toISOString(),
             response_type: "email_reply",
-            updated_fields: extractedUpdates,
+            updated_fields: updates,
           })
           .eq("id", verification.id);
 
+        updated++;
+      } else if (interpreted.kind === "confirm") {
+        await supabase
+          .from("tom_contacts")
+          .update({
+            verified_at: new Date().toISOString(),
+            verification_status: "verified",
+            verification_next_eligible_at: verificationLockDate(),
+            verification_sequence_reset_at: null,
+            verification_attempts: 0,
+          })
+          .eq("id", contact.id);
+        await supabase
+          .from("tom_verifications")
+          .update({
+            status: "confirmed",
+            responded_at: new Date().toISOString(),
+            response_type: "email_reply_confirm",
+          })
+          .eq("id", verification.id);
         updated++;
       }
     }
@@ -299,4 +329,61 @@ Email: ${bodyText.slice(0, 1000)}`,
   }
 
   return NextResponse.json({ success: true, parsed: processed, opted_out: optedOut, updated });
+}
+
+function googleResourceName(contact: {
+  google_resource_name?: string | null;
+  google_contact_id?: string | null;
+} | null): string | null {
+  const resource = contact?.google_resource_name || contact?.google_contact_id;
+  if (!resource || typeof resource !== "string") return null;
+  if (resource.startsWith("email_scrape_") || resource.startsWith("manual_")) return null;
+  return resource;
+}
+
+function verificationLockDate(): string {
+  const next = new Date();
+  next.setMonth(next.getMonth() + 18);
+  return next.toISOString();
+}
+
+function hasVerificationUpdates(updates: VerificationUpdates): boolean {
+  return Boolean(
+    updates.phone ||
+    updates.home_address ||
+    updates.work_address ||
+    updates.birthday ||
+    updates.job_title ||
+    updates.company
+  );
+}
+
+async function extractReplyWithModel(text: string): Promise<VerificationUpdates> {
+  if (!text.trim() || !process.env.ANTHROPIC_API_KEY) return {};
+  try {
+    const claudeRes = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": process.env.ANTHROPIC_API_KEY,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 500,
+        messages: [{
+          role: "user",
+          content: `Extract updated contact information from this email reply. Return ONLY a JSON object with fields the person explicitly states. Use home_address and work_address objects with streetAddress, city, region, postalCode. Also phone, birthday, job_title, company. Omit anything not clearly stated. Return {} if nothing is clear.\n\nEmail:\n${text.slice(0, 2000)}`,
+        }],
+      }),
+    });
+    if (!claudeRes.ok) return {};
+    const claudeData = await claudeRes.json();
+    const rawText = claudeData.content?.[0]?.text || "{}";
+    const parsed = JSON.parse(rawText.replace(/```json|```/g, "").trim());
+    return normalizeModelUpdates(parsed);
+  } catch (err) {
+    console.error("[verify-parse] reply model extract failed:", err);
+    return {};
+  }
 }
