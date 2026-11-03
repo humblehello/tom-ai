@@ -5,6 +5,8 @@ import { getValidAccessToken } from "@/app/lib/google";
 import { updateGoogleContact } from "@/app/lib/googleContacts";
 import { isBlockedEmail } from "@/app/lib/contact-blocklist";
 import { findContactsByEmail } from "@/app/lib/contact-dedupe";
+import { planCursorWrite, planSyncRequest } from "@/app/lib/google-sync-cursor";
+import { inngest } from "@/app/lib/inngest";
 
 function fmtPhone(raw: string): string {
   if (!raw) return raw;
@@ -24,6 +26,23 @@ const supabase = createClient(
 async function getUserId(): Promise<string | null> {
   const cookieStore = await cookies();
   return cookieStore.get("tom_session")?.value || null;
+}
+
+async function saveSyncCursor(userId: string, write: { syncToken?: string | null; pageToken: string | null; mode: string | null }) {
+  if (write.syncToken !== undefined) {
+    await supabase
+      .from("tom_users")
+      .update({ google_sync_token: write.syncToken })
+      .eq("id", userId);
+  }
+  const extra: Record<string, string | null> = {
+    google_sync_page_token: write.pageToken,
+    google_sync_mode: write.mode,
+  };
+  const { error } = await supabase.from("tom_users").update(extra).eq("id", userId);
+  if (error) {
+    console.warn("Google sync cursor was not stored. Run the sync-cursor migration.", error.message);
+  }
 }
 
 function fixReversedName(displayName: string, givenName: string, familyName: string): string {
@@ -50,71 +69,103 @@ export async function GET(req: Request) {
   if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
 
   try {
+    if (searchParams.get("enqueue") === "1") {
+      await inngest.send({ name: "tom/contacts.sync", data: { userId } });
+      return NextResponse.json({
+        queued: true,
+        synced: 0,
+        message: "Google sync is running in the background, one page at a time.",
+      });
+    }
+
     const accessToken = await getValidAccessToken(userId);
 
-    // Get stored sync token for this user
-    const { data: userData } = await supabase
+    const rich = await supabase
       .from("tom_users")
-      .select("google_sync_token")
+      .select("google_sync_token, google_sync_page_token, google_sync_mode")
       .eq("id", userId)
       .single();
 
-    const storedSyncToken = userData?.google_sync_token || null;
-    const pageToken = searchParams.get("pageToken") || undefined;
+    let storedSyncToken: string | null = null;
+    let storedPageToken: string | null = null;
+    let storedMode: string | null = null;
+    if (rich.error) {
+      const basic = await supabase
+        .from("tom_users")
+        .select("google_sync_token")
+        .eq("id", userId)
+        .single();
+      storedSyncToken = basic.data?.google_sync_token || null;
+    } else {
+      storedSyncToken = rich.data?.google_sync_token || null;
+      storedPageToken = rich.data?.google_sync_page_token || null;
+      storedMode = rich.data?.google_sync_mode || null;
+    }
 
-    // Build request URL — use syncToken if available for delta sync
+    const requestPlan = planSyncRequest({
+      storedSyncToken,
+      storedPageToken,
+      storedMode,
+      requestedPageToken: searchParams.get("pageToken"),
+      forceFull: searchParams.get("full") === "1",
+    });
+
+    // One page per call. The caller (Inngest) continues with nextPageToken.
     const url = new URL("https://people.googleapis.com/v1/people/me/connections");
     url.searchParams.set(
       "personFields",
       "names,emailAddresses,phoneNumbers,birthdays,events,addresses,organizations,biographies,metadata"
     );
     url.searchParams.set("pageSize", "100");
-
-    // If we have a sync token and no pageToken, use delta sync
-    // Delta sync only returns changed/deleted contacts since last sync
-    if (storedSyncToken && !pageToken) {
-      url.searchParams.set("syncToken", storedSyncToken);
-      url.searchParams.set("requestSyncToken", "true");
-    } else {
-      // Full sync — request a new sync token at the end
-      url.searchParams.set("requestSyncToken", "true");
-      if (pageToken) url.searchParams.set("pageToken", pageToken);
+    url.searchParams.set("requestSyncToken", "true");
+    if (requestPlan.useSyncToken && requestPlan.syncToken) {
+      url.searchParams.set("syncToken", requestPlan.syncToken);
     }
+    if (requestPlan.pageToken) url.searchParams.set("pageToken", requestPlan.pageToken);
 
     const res = await fetch(url.toString(), {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
 
-    // Sync token can become invalid — fall back to full sync
-    if (res.status === 410) {
-      console.log("Sync token expired, falling back to full sync");
-      await supabase
-        .from("tom_users")
-        .update({ google_sync_token: null })
-        .eq("id", userId);
+    const cursorWrite = planCursorWrite({
+      httpStatus: res.status,
+      nextPageToken: null,
+      nextSyncToken: null,
+      requestMode: requestPlan.mode,
+    });
 
+    // Sync token can become invalid. Clear it and let the next run start a full sync.
+    if (res.status === 410) {
+      console.log("Sync token expired. Next run will start a full sync.");
+      await saveSyncCursor(userId, cursorWrite);
       return NextResponse.json({
         synced: 0,
         deleted: 0,
         nextPageToken: null,
         has_more: false,
+        mode: "full",
         sync_token_expired: true,
-        message: "Sync token expired — full sync will run on next call",
+        restart_full: true,
+        message: "Sync token expired. A full sync continues on the next run.",
       });
+    }
+
+    if (!res.ok) {
+      const errText = await res.text();
+      return NextResponse.json({ error: errText || "Google sync failed" }, { status: res.status });
     }
 
     const data = await res.json();
     const contacts = data.connections || [];
     const nextPageToken = data.nextPageToken || null;
     const newSyncToken = data.nextSyncToken || null;
-
-    // Save new sync token when we reach the last page
-    if (newSyncToken && !nextPageToken) {
-      await supabase
-        .from("tom_users")
-        .update({ google_sync_token: newSyncToken })
-        .eq("id", userId);
-    }
+    const progress = planCursorWrite({
+      httpStatus: 200,
+      nextPageToken,
+      nextSyncToken: newSyncToken,
+      requestMode: requestPlan.mode,
+    });
+    await saveSyncCursor(userId, progress);
 
     let synced = 0;
     let deleted = 0;
@@ -460,7 +511,9 @@ const allPhones = person.phoneNumbers?.map((p: any) => p.value).filter(Boolean) 
       tom_wins,
       nextPageToken,
       has_more: !!nextPageToken,
-      sync_token_saved: !!(newSyncToken && !nextPageToken),
+      mode: progress.mode,
+      restart_full: false,
+      sync_token_saved: progress.finished && !!progress.syncToken,
       pending: pendingCount || 0,
     });
   } catch (e: any) {

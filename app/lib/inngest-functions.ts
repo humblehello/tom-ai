@@ -243,7 +243,9 @@ export const contactsScore = inngest.createFunction(
     const userId = event.data.userId as string;
     await step.run("score", async () => { await scoreAllContacts(userId); return { ok: true }; });
     await step.run("clean", async () => { await supabase.rpc("auto_clean_contacts", { p_user_id: userId }); return { ok: true }; });
-    await step.run("merge", async () => { await supabase.rpc("merge_duplicate_contacts", { p_user_id: userId }); return { ok: true }; });
+    // DISABLED: merge_duplicate_contacts refilled the review queue on every score.
+    // Open PR #1 comments this same call out. POST /api/contacts/merge still runs it on request.
+    // await step.run("merge", async () => { await supabase.rpc("merge_duplicate_contacts", { p_user_id: userId }); return { ok: true }; });
     // DISABLED 2026-05-10 per Tom: auto-merge is causing problems, review queue only
 // await step.run("auto-merge", async () => {
 //   const res = await fetch(`${APP_URL}/api/contacts/auto-merge`, {
@@ -257,16 +259,63 @@ export const contactsScore = inngest.createFunction(
 );
 
 // ── GOOGLE SYNC ───────────────────────────────────────────────────────────────
+// One People API page per run, then a new event for the next page.
+// A single run stays short. The page token is also stored on tom_users so a
+// later run can resume. nextSyncToken is saved by the route only on the last page.
+// A 410 starts a full sync on the following run instead of inside this one.
 export const contactsSync = inngest.createFunction(
-  { id: "contacts-sync", name: "Google Contacts Sync", triggers: [{ event: "tom/contacts.sync" }] },
+  {
+    id: "contacts-sync",
+    name: "Google Contacts Sync",
+    timeouts: { finish: "10m" },
+    triggers: [{ event: "tom/contacts.sync" }],
+  },
   async ({ event, step }: any) => {
     const userId = event.data.userId as string;
+    const pageToken = (event.data.pageToken as string | undefined) || "";
+    const forceFull = event.data.forceFull === true;
 
-    await step.run("sync", async () => {
-      const res = await fetch(`${APP_URL}/api/contacts/google-sync?secret=${process.env.CRON_SECRET}&userId=${userId}`);
-      const d = await res.json();
-      return { synced: d.synced || 0 };
+    const page = await step.run("sync-page", async () => {
+      const params = new URLSearchParams({
+        secret: process.env.CRON_SECRET || "",
+        userId,
+      });
+      if (pageToken) params.set("pageToken", pageToken);
+      if (forceFull) params.set("full", "1");
+      const res = await fetch(`${APP_URL}/api/contacts/google-sync?${params}`);
+      return res.json();
     });
+
+    if (page.superseded) return { userId, status: "superseded" };
+
+    if (page.sync_token_expired || page.restart_full) {
+      await step.sleep("before-full-restart", "2s");
+      await step.run("enqueue-full-restart", async () => {
+        await inngest.send({
+          name: "tom/contacts.sync",
+          data: { userId, forceFull: true, continue: true },
+        });
+        return { enqueued: "full" };
+      });
+      return { userId, status: "restart_full" };
+    }
+
+    if (page.nextPageToken) {
+      await step.sleep("before-next-page", "2s");
+      await step.run("enqueue-next-page", async () => {
+        await inngest.send({
+          name: "tom/contacts.sync",
+          data: {
+            userId,
+            pageToken: page.nextPageToken,
+            forceFull: forceFull || page.mode === "full",
+            continue: true,
+          },
+        });
+        return { enqueued: page.nextPageToken };
+      });
+      return { userId, status: "continued", synced: page.synced || 0 };
+    }
 
     await step.run("deletions", async () => {
       const accessToken = await getValidAccessToken(userId);

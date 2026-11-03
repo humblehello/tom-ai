@@ -1388,18 +1388,9 @@ const handlePullFromProvider = async () => {
         .then(d => setPendingCount(d.count || 0))
         .catch(() => {});
     } else {
-      let pageToken = ""; let totalSynced = 0; let totalBirthdays = 0; let pages = 0;
-      do {
-        const url = `/api/contacts/google-sync${pageToken ? `?pageToken=${pageToken}` : ""}`;
-        const res = await fetch(url);
-        const data = await res.json();
-        if (data.sync_token_expired) break;
-        totalSynced += data.synced || 0;
-        totalBirthdays += data.birthdays_found || 0;
-        pageToken = data.nextPageToken || "";
-        pages++;
-      } while (pageToken && pages < 300);
-      setSyncResult({ synced: totalSynced, birthdays: totalBirthdays, direction: "pull" });
+      const res = await fetch("/api/contacts/google-sync?enqueue=1");
+      const data = await res.json();
+      setSyncResult({ synced: data.synced || 0, birthdays: 0, direction: "pull", queued: !!data.queued });
       fetch("/api/contacts/google-pending")
         .then(r => r.json())
         .then(d => setPendingCount(d.count || 0))
@@ -1776,7 +1767,9 @@ if (filterGiftReady) filtered = filtered.filter(c => c.gifting_eligible || c.hom
               ? syncResult.queued
                 ? `Queued ${syncResult.pushed} contacts for ${emailProvider === "microsoft" ? "Outlook" : "Google"} sync. Running in background — should finish in ~${Math.ceil((syncResult.pushed * 0.5) / 60)} minutes.`
                 : `Push started — ${syncResult.pushed} contacts queued for ${emailProvider === "microsoft" ? "Outlook" : "Google"} sync`
-              : `Pulled from ${emailProvider === "microsoft" ? "Outlook" : "Google"} — ${syncResult.synced} new contacts${syncResult.birthdays ? ` · ${syncResult.birthdays} birthdays found` : ""}`}
+              : syncResult.queued
+                ? `Google sync is running in the background. A large address book continues one page at a time instead of in this tab.`
+                : `Pulled from ${emailProvider === "microsoft" ? "Outlook" : "Google"} — ${syncResult.synced} new contacts${syncResult.birthdays ? ` · ${syncResult.birthdays} birthdays found` : ""}`}
           </div>
         )}
 
