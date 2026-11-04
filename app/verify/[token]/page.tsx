@@ -22,6 +22,8 @@ export default function VerifyPage() {
   const [submitting, setSubmitting] = useState(false);
   const [showOptOutConfirm, setShowOptOutConfirm] = useState(false);
   const [optedOut, setOptedOut] = useState(false);
+  const [awaitingConfirm, setAwaitingConfirm] = useState(false);
+  const [showSocial, setShowSocial] = useState(false);
 
   // Basic
   const [phone, setPhone] = useState("");
@@ -80,18 +82,16 @@ export default function VerifyPage() {
         setInstagram(info.instagram_url || "");
         setFacebook(info.facebook_url || "");
         setTopics(info.topics || []);
+        if (info.linkedin_url || info.twitter_url || info.instagram_url || info.facebook_url) {
+          setShowSocial(true);
+        }
         setLoading(false);
 
-        if (window.location.search.includes("optout=1")) {
+        const search = new URLSearchParams(window.location.search);
+        if (search.get("optout") === "1") {
           setShowOptOutConfirm(true);
-        }
-        if (window.location.search.includes("confirm=true")) {
-          setSubmitting(true);
-          fetch(`/api/contacts/verify/${token}/output`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ confirmed_correct: true }),
-          }).then(() => setSubmitted(true)).finally(() => setSubmitting(false));
+        } else if (search.get("confirm") === "true") {
+          setAwaitingConfirm(true);
         }
       } catch {
         setError("Something went wrong. Please try again.");
@@ -125,15 +125,19 @@ export default function VerifyPage() {
     setSubmitting(false);
   };
 
-  const handleOptOut = async () => {
+  const handleConfirmCorrect = async () => {
+    setSubmitting(true);
     try {
       await fetch(`/api/contacts/verify/${token}/output`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ opt_out: true }),
+        body: JSON.stringify({ confirmed_correct: true }),
       });
-    } catch {}
-    setOptedOut(true);
+      setSubmitted(true);
+    } catch {
+      alert("Something went wrong. Please try again.");
+    }
+    setSubmitting(false);
   };
 
   const addTopic = () => {
@@ -198,12 +202,12 @@ if (optedOut) return (
         </div>
         <p style={{ fontSize: 14, color: C.text3, marginBottom: 32 }}>Your info has been updated.</p>
         <div style={{ height: 1, background: C.border, marginBottom: 32 }} />
-        <p style={{ fontSize: 13, color: C.text3, marginBottom: 16 }}>
-          Want to stay better connected with the people in your life?
+        <p style={{ fontSize: 15, color: C.text2, marginBottom: 8, lineHeight: 1.6 }}>
+          Want this for your own contacts?
         </p>
         <a href="https://humblehello.com" style={{ textDecoration: "none", display: "inline-block" }}>
-          <img src="/logo.png" alt="humble hello." style={{ height: 32, display: "block", margin: "0 auto 10px" }} />
-          <span style={{ fontSize: 13, fontWeight: 700, color: "#bf5c38", display: "block" }}>Join for free</span>
+          <img src="/logo.png" alt="Humble Hello" style={{ height: 28, display: "block", margin: "0 auto 10px" }} />
+          <span style={{ fontSize: 15, fontWeight: 700, color: "#9a4429", display: "block" }}>Join Humble Hello free</span>
         </a>
       </div>
     </div>
@@ -225,10 +229,25 @@ if (optedOut) return (
           <p style={{ fontSize: 15, color: C.text, margin: "0 0 6px 0", fontWeight: 600 }}>
             Hi {data?.contact_name?.split(" ")[0]},
           </p>
-          <p style={{ fontSize: 15, color: C.text2, lineHeight: 1.7, margin: 0 }}>
-            Thank you for helping me keep your info up to date.
+          <p style={{ fontSize: 15, color: C.text2, lineHeight: 1.7, margin: "0 0 10px 0" }}>
+            {data?.sender_name || "Someone"} asked you to check the details they have on file. Nothing is saved until you choose to.
+          </p>
+          <p style={{ fontSize: 13, color: C.text3, lineHeight: 1.6, margin: 0 }}>
+            This page is on humblehello.com. No login or password.
           </p>
         </div>
+
+        {awaitingConfirm && (
+          <div style={{ background: C.sageLight, border: `1px solid ${C.sage}`, borderRadius: 12, padding: "16px 18px", marginBottom: 16 }}>
+            <p style={{ fontSize: 14, color: C.text, margin: "0 0 12px 0", lineHeight: 1.6 }}>
+              Opening this link does not confirm anything. Click below if the details look right.
+            </p>
+            <button onClick={handleConfirmCorrect} disabled={submitting}
+              style={{ padding: "10px 16px", borderRadius: 8, border: "none", background: C.sage, color: "#fff", fontSize: 14, fontWeight: 600, cursor: submitting ? "default" : "pointer", fontFamily: font }}>
+              {submitting ? "Saving..." : "Yes, everything looks correct"}
+            </button>
+          </div>
+        )}
 
         {/* BASIC INFO */}
         <span style={sectionTitle}>Basic Info</span>
@@ -294,9 +313,12 @@ if (optedOut) return (
           </div>
         </div>
 
-        {/* SOCIAL */}
-        <span style={sectionTitle}>Social</span>
-        <div style={cardStyle}>
+        {/* SOCIAL — optional, collapsed unless something is already on file */}
+        <button type="button" onClick={() => setShowSocial(open => !open)}
+          style={{ background: "none", border: "none", padding: 0, marginTop: 8, marginBottom: 10, color: C.text3, fontSize: 13, cursor: "pointer", fontFamily: font, textDecoration: "underline" }}>
+          {showSocial ? "Hide social profiles" : "Add social profiles (optional)"}
+        </button>
+        {showSocial && <div style={cardStyle}>
           <div style={{ marginBottom: 10 }}>
             <label style={lStyle}>LinkedIn</label>
             <input style={iStyle} placeholder="https://linkedin.com/in/username" value={linkedin} onChange={e => setLinkedin(e.target.value)} />
@@ -313,7 +335,7 @@ if (optedOut) return (
             <label style={lStyle}>Facebook</label>
             <input style={iStyle} placeholder="https://facebook.com/username" value={facebook} onChange={e => setFacebook(e.target.value)} />
           </div>
-        </div>
+        </div>}
 
         {/* INTERESTS */}
         <span style={sectionTitle}>Interests & Topics</span>
@@ -350,16 +372,7 @@ if (optedOut) return (
         </button>
 
         {/* Looks correct */}
-        <button onClick={async () => {
-          setSubmitting(true);
-          await fetch(`/api/contacts/verify/${token}/output`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ confirmed_correct: true }),
-          });
-          setSubmitted(true);
-          setSubmitting(false);
-        }} style={{ width: "100%", padding: "11px", borderRadius: 8, background: "transparent", color: C.text3, border: `1px solid ${C.border2}`, fontSize: 13, fontWeight: 500, cursor: "pointer", fontFamily: font, marginBottom: 24 }}>
+        <button onClick={handleConfirmCorrect} disabled={submitting} style={{ width: "100%", padding: "11px", borderRadius: 8, background: "transparent", color: C.text3, border: `1px solid ${C.border2}`, fontSize: 13, fontWeight: 500, cursor: submitting ? "default" : "pointer", fontFamily: font, marginBottom: 24 }}>
           Everything looks correct
         </button>
 
@@ -369,7 +382,7 @@ if (optedOut) return (
             <div style={{ textAlign: "center" as const }}>
               <button onClick={() => setShowOptOutConfirm(true)}
                 style={{ background: "none", border: "none", color: C.text4, fontSize: 12, cursor: "pointer", textDecoration: "underline", fontFamily: font }}>
-                Remove me from this list
+                {"Prefer I don't ask? Let me know"}
               </button>
             </div>
           ) : (
@@ -421,8 +434,8 @@ if (optedOut) return (
      {/* Footer */}
         <div style={{ textAlign: "center" as const, paddingBottom: 16, paddingTop: 24, borderTop: `1px solid ${C.border}` }}>
           <a href="https://humblehello.com" style={{ textDecoration: "none", display: "flex", flexDirection: "column" as const, alignItems: "center", gap: 6 }}>
-            <img src="/logo.png" alt="humble hello." style={{ height: 36 }} />
-            <span style={{ fontSize: 15, fontWeight: 700, color: "#bf5c38", fontFamily: font }}>Join for free</span>
+            <img src="/logo.png" alt="Humble Hello" style={{ height: 28 }} />
+            <span style={{ fontSize: 13, color: C.text3, fontFamily: font }}>Try Humble Hello free</span>
           </a>
         </div>
 

@@ -35,6 +35,8 @@ export interface SendMailParams {
   text?: string;
   saveToSentItems?: boolean;
   replyTo?: string;
+  fromName?: string;
+  fromEmail?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -45,6 +47,17 @@ export async function sendMicrosoftMail(
   userId: string,
   params: SendMailParams
 ): Promise<void> {
+  if (params.text && params.fromEmail && params.saveToSentItems !== false) {
+    const mime = buildMultipartAlternative(params);
+    const encoded = Buffer.from(mime, 'utf8').toString('base64');
+    await graphFetch(userId, '/me/sendMail', {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+      body: encoded,
+    });
+    return;
+  }
+
   const message = {
     subject: params.subject,
     body: { contentType: 'HTML', content: params.html },
@@ -63,6 +76,72 @@ export async function sendMicrosoftMail(
       saveToSentItems: params.saveToSentItems ?? true,
     }),
   });
+}
+
+function buildMultipartAlternative(params: SendMailParams): string {
+  const boundary = `hh_${Date.now().toString(36)}`;
+  const headers = [
+    `From: ${formatMailbox(params.fromName, params.fromEmail || '')}`,
+    `To: ${headerAddressList(params.to)}`,
+    `Subject: ${encodeMimeHeader(params.subject)}`,
+    'MIME-Version: 1.0',
+    `Content-Type: multipart/alternative; boundary="${boundary}"`,
+  ];
+  if (params.cc) headers.push(`Cc: ${headerAddressList(params.cc)}`);
+  if (params.bcc) headers.push(`Bcc: ${headerAddressList(params.bcc)}`);
+  if (params.replyTo) headers.push(`Reply-To: ${headerAddressList(params.replyTo)}`);
+
+  return [
+    headers.join('\r\n'),
+    '',
+    `--${boundary}`,
+    mimeBodyPart('text/plain; charset="UTF-8"', params.text || ''),
+    `--${boundary}`,
+    mimeBodyPart('text/html; charset="UTF-8"', params.html),
+    `--${boundary}--`,
+    '',
+  ].join('\r\n');
+}
+
+function headerAddressList(addrs: string | string[]): string {
+  const arr = Array.isArray(addrs) ? addrs : [addrs];
+  return arr.map((raw) => {
+    const match = raw.match(/^\s*(.*?)\s*<([^>]+)>\s*$/);
+    if (!match) return raw.trim();
+    return formatMailbox(match[1], match[2]);
+  }).join(', ');
+}
+
+function formatMailbox(name: string | undefined, email: string): string {
+  const trimmed = name?.trim();
+  if (!trimmed) return email.trim();
+  return `${encodeDisplayName(trimmed)} <${email.trim()}>`;
+}
+
+function encodeDisplayName(name: string): string {
+  if (/[^\t\x20-\x7E]/.test(name)) return encodeMimeHeader(name);
+  if (/["\\,;<>]/.test(name)) {
+    return `"${name.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+  }
+  return name;
+}
+
+function encodeMimeHeader(value: string): string {
+  if (/^[\t\x20-\x7E]*$/.test(value)) return value;
+  return `=?UTF-8?B?${Buffer.from(value, 'utf8').toString('base64')}?=`;
+}
+
+function mimeBodyPart(contentType: string, content: string): string {
+  const encoded = Buffer.from(content, 'utf8')
+    .toString('base64')
+    .replace(/.{76}/g, '$&\r\n');
+  return [
+    `Content-Type: ${contentType}`,
+    'Content-Transfer-Encoding: base64',
+    '',
+    encoded,
+    '',
+  ].join('\r\n');
 }
 
 function toRecipientList(addrs: string | string[]): GraphRecipient[] {
