@@ -4,8 +4,9 @@ import { createClient } from "@supabase/supabase-js";
 import { getValidAccessToken } from "../../../lib/google";
 import { createGoogleContact, updateGoogleContact } from "../../../lib/googleContacts";
 import { contactImportGuard } from "../../../lib/contactGuard";
-import { isBlockedEmail } from "@/app/lib/contact-blocklist";
 import { findContactsByEmail, insertDecision } from "../../../lib/contact-dedupe";
+import { isAutoReplyTemplate } from "../../../lib/auto-reply-templates";
+import { junkInboundReason, screenInboundSender, type SentMessage } from "../../../lib/inbound-screen";
 import {
   collectPhoneOwners,
   extractBodiesFromPayload,
@@ -163,6 +164,54 @@ async function processSignatures(userId: string, batchSize: number) {
 
   return { scanned: contacts?.length || 0, updated };
 }
+const JUNK_DOMAIN_PREFIXES = ["mail.","email.","send.","msg.","ifly.","em.","t.","notify.","notification.","engagement.","welcome.","e-exclusive.","card.","business.","reply."];
+const JUNK_SENDING_DOMAINS = ["substack.com","mailchimp.com","sendgrid.net","constantcontact.com","amazonses.com","shadow.outlook.com","mindbodyonline.com","pacers-mail.com","fyxer.com"];
+
+async function stageInboundPending(userId: string, email: string, fullName: string, subject: string, reason: string) {
+  const { error } = await supabase.from("inbound_pending_contacts").upsert({
+    user_id: userId,
+    email,
+    full_name: fullName,
+    subject: subject || null,
+    reason,
+    source: "inbox_scan",
+    updated_at: new Date().toISOString(),
+  }, { onConflict: "user_id,email" });
+  if (error) {
+    console.error(`Inbound sender ${email} was not saved (${reason}). Contact was not created.`, error.message);
+  }
+}
+
+async function sentMessagesTo(accessToken: string, email: string): Promise<SentMessage[]> {
+  const query = `in:sent to:${email} newer_than:2y`;
+  const listRes = await fetch(
+    `https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=5&q=${encodeURIComponent(query)}`,
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+  const listData = await listRes.json();
+  const out: SentMessage[] = [];
+  for (const msg of (listData.messages || []).slice(0, 3)) {
+    const metaRes = await fetch(
+      `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}?format=metadata&metadataHeaders=Date`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    const meta = await metaRes.json();
+    const date = (meta.payload?.headers || []).find((h: any) => h.name === "Date")?.value || null;
+    let body = meta.snippet || "";
+    if (body && !isAutoReplyTemplate(body)) {
+      const fullRes = await fetch(
+        `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}?format=full`,
+        { headers: { Authorization: `Bearer ${accessToken}` } }
+      );
+      const full = await fullRes.json();
+      const bodies = extractBodiesFromPayload(full.payload);
+      body = (bodies.text || bodies.html || body).slice(0, 4000);
+    }
+    out.push({ body, date });
+  }
+  return out;
+}
+
 async function createContactsFromInbox(userId: string, accessToken: string) {
   const { data: userData } = await supabase
     .from("tom_users")
@@ -171,55 +220,77 @@ async function createContactsFromInbox(userId: string, accessToken: string) {
     .single();
   const ownEmail = userData?.email?.toLowerCase() || "";
 
-  // Get last 50 emails received in last 30 days
+  // Recent inbox mail. Machine senders are filtered in code, not only by the query,
+  // so a human-looking cold pitch still has to pass the two-way check.
   const thirtyDaysAgo = Math.floor((Date.now() - 30 * 24 * 60 * 60 * 1000) / 1000);
   const listRes = await fetch(
-    `https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=50&q=after:${thirtyDaysAgo} -from:me -from:noreply -from:no-reply -from:notifications -from:newsletter`,
+    `https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=40&q=after:${thirtyDaysAgo} -from:me`,
     { headers: { Authorization: `Bearer ${accessToken}` } }
   );
   const listData = await listRes.json();
-  if (!listData.messages?.length) return { created: 0 };
+  if (!listData.messages?.length) return { created: 0, pending: 0, skipped: 0 };
 
   const context = await loadSignatureContext(userId);
   let created = 0;
+  let pending = 0;
+  let skipped = 0;
+  let sentChecks = 0;
+  const seen = new Set<string>();
 
-  for (const msg of listData.messages.slice(0, 50)) {
+  for (const msg of listData.messages.slice(0, 40)) {
     try {
       const msgRes = await fetch(
-        `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject`,
+        `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}?format=metadata&metadataHeaders=From&metadataHeaders=Subject&metadataHeaders=Date&metadataHeaders=List-Unsubscribe&metadataHeaders=List-Unsubscribe-Post&metadataHeaders=Precedence`,
         { headers: { Authorization: `Bearer ${accessToken}` } }
       );
       const msgData = await msgRes.json();
       const headers = msgData.payload?.headers || [];
-      const fromHeader = headers.find((h: any) => h.name === "From")?.value || "";
-
-      // Parse "Name <email>" or just "email"
+      const fromHeader = headerValue(headers, "From");
       const emailMatch = fromHeader.match(/<(.+?)>/) || fromHeader.match(/([^\s]+@[^\s]+)/);
       if (!emailMatch) continue;
       const email = emailMatch[1].toLowerCase().trim();
-       if (!email || email.includes(ownEmail)) continue;
-      // Local-part blocklist moved to app/lib/contact-blocklist.ts (substring match)
-      if (isBlockedEmail(email)) continue;
+      if (!email || email === ownEmail || email.includes(ownEmail) || seen.has(email)) continue;
+      seen.add(email);
 
-      // Domain-level blocklists kept inline (these are sending-infrastructure domains, not local-part keywords)
-      const JUNK_DOMAIN_PREFIXES = ["mail.","email.","send.","msg.","ifly.","em.","t.","notify.","notification.","engagement.","welcome.","e-exclusive.","card.","business.","reply."];
-      const JUNK_SENDING_DOMAINS = ["substack.com","mailchimp.com","sendgrid.net","constantcontact.com","amazonses.com","shadow.outlook.com","mindbodyonline.com","pacers-mail.com","fyxer.com"];
       const domain = email.split("@")[1] || "";
-      if (JUNK_SENDING_DOMAINS.some(j => domain === j)) continue;
-      if (JUNK_DOMAIN_PREFIXES.some(j => domain.startsWith(j))) continue;
+      if (JUNK_SENDING_DOMAINS.some(j => domain === j) || JUNK_DOMAIN_PREFIXES.some(j => domain.startsWith(j))) {
+        skipped++;
+        continue;
+      }
+      if (junkInboundReason(email, headers)) {
+        skipped++;
+        continue;
+      }
 
       const nameMatch = fromHeader.match(/^"?([^"<]+)"?\s*</);
       const fullName = nameMatch ? nameMatch[1].trim() : email.split("@")[0];
+      const subject = headerValue(headers, "Subject");
+      const inboundDate = headerValue(headers, "Date");
 
-      // A failed maybeSingle (email already on more than one row) must not create another.
       const existing = await findContactsByEmail(supabase, userId, email);
       if (insertDecision(existing) === "skip") continue;
 
-      // Run blocklist + deleted guard
       const guard = await contactImportGuard(userId, email, fullName, "inbox_scan", { from: fromHeader });
       if (guard !== "allow") continue;
 
-      // Get email body to extract signature
+      // Cap Gmail sent lookups so this job stays inside its time limit.
+      // Unchecked senders are staged, not saved.
+      let sentMessages: SentMessage[] = [];
+      if (sentChecks >= 12) {
+        await stageInboundPending(userId, email, fullName, subject, "sent_mail_unverified");
+        pending++;
+        continue;
+      }
+      sentChecks++;
+      sentMessages = await sentMessagesTo(accessToken, email);
+
+      const decision = screenInboundSender({ email, headers, sentMessages, inboundDate });
+      if (decision.action !== "create") {
+        await stageInboundPending(userId, email, fullName, subject, decision.reason);
+        pending++;
+        continue;
+      }
+
       const fullMsgRes = await fetch(
         `https://gmail.googleapis.com/gmail/v1/users/me/messages/${msg.id}?format=full`,
         { headers: { Authorization: `Bearer ${accessToken}` } }
@@ -238,7 +309,6 @@ async function createContactsFromInbox(userId: string, accessToken: string) {
         phonesOnOtherContacts: context.owners,
       }), {});
 
-      // Create the contact
       const { data: newContact } = await supabase
         .from("tom_contacts")
         .insert({
@@ -259,10 +329,8 @@ async function createContactsFromInbox(userId: string, accessToken: string) {
 
       if (newContact) {
         await recordPhoneConflicts(userId, newContact, sigData.conflicts);
-        // Also create in Google Contacts
         try {
-          const gToken = accessToken;
-          const resourceName = await createGoogleContact(gToken, {
+          const resourceName = await createGoogleContact(accessToken, {
             full_name: newContact.full_name,
             email: newContact.email,
             phone: newContact.phone,
@@ -277,16 +345,15 @@ async function createContactsFromInbox(userId: string, accessToken: string) {
               .eq("id", newContact.id);
           }
         } catch {}
+        await supabase.from("inbound_pending_contacts").delete().eq("user_id", userId).eq("email", email);
         created++;
       }
-
-      await new Promise(r => setTimeout(r, 200));
     } catch (e) {
       console.error("Inbox scan error:", e);
     }
   }
 
-  return { created };
+  return { created, pending, skipped };
 }
 // ── Process Google Calendar for shared events ─────────────────────────────────
 async function processCalendar(userId: string, batchSize: number) {

@@ -4,6 +4,7 @@ import { createClient } from "@supabase/supabase-js";
 import { updateGoogleContact, createGoogleContact } from "../../../lib/googleContacts";
 import { isBlockedEmail } from "@/app/lib/contact-blocklist";
 import { findContactsByEmail, findContactsByName } from "../../../lib/contact-dedupe";
+import { hasGenuineOutbound, junkInboundReason } from "../../../lib/inbound-screen";
 import {
   collectPhoneOwners,
   extractBodiesFromPayload,
@@ -152,6 +153,7 @@ export async function POST(req: NextRequest) {
           html: bodies.html,
           // Only the sender's new content — not the quoted thread
           body,
+          outboundText: msg.folder === "sent" ? (bodies.text || "").slice(0, 4000) : "",
           primary_sender_email: extractEmailAddress(from),
         };
       })
@@ -160,6 +162,8 @@ export async function POST(req: NextRequest) {
     // ── Step 3: Build two-way contact map ──
     const receivedFrom = new Set<string>();
     const sentTo = new Set<string>();
+    const sentBodies: Record<string, string[]> = {};
+    const inboxHeaders: Record<string, { name: string; value: string }[]> = {};
     const emailDates: Record<string, string> = {};
     const emailCounts: Record<string, number> = {};
 
@@ -170,6 +174,7 @@ export async function POST(req: NextRequest) {
           receivedFrom.add(addr);
           emailDates[addr] = email.date;
           emailCounts[addr] = (emailCounts[addr] || 0) + 1;
+          if (!inboxHeaders[addr]) inboxHeaders[addr] = email.headers || [];
         }
       } else {
         const addr = extractEmailAddress(email.to);
@@ -177,12 +182,19 @@ export async function POST(req: NextRequest) {
           sentTo.add(addr);
           emailDates[addr] = email.date;
           emailCounts[addr] = (emailCounts[addr] || 0) + 1;
+          const bodies = sentBodies[addr] || [];
+          if (email.outboundText) bodies.push(email.outboundText);
+          sentBodies[addr] = bodies;
         }
       }
     }
 
+    // A sent message counts only when it is not an ARF / qualifier auto-reply.
     const twoWayEmails = new Set(
-      [...receivedFrom].filter(e => sentTo.has(e))
+      [...receivedFrom].filter((addr) => {
+        if (!sentTo.has(addr)) return false;
+        return hasGenuineOutbound((sentBodies[addr] || []).map((body) => ({ body }))).genuine;
+      })
     );
 
     // ── Step 4: Use Claude to extract + score contacts ──
@@ -362,6 +374,7 @@ ${e.body}
         const isClean = !isBlockedSender(personEmail);
 
         if (!isTwoWay || !isFrequent || !isClean) continue;
+        if (junkInboundReason(personEmail, inboxHeaders[personEmail] || [])) continue;
 
         const { data: newContact } = await supabase
           .from("tom_contacts")
